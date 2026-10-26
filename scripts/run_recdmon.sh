@@ -22,7 +22,7 @@ run_step () {
   fi
 }
 
-DATASET="Beauty"
+DATASET="${DATASET}"
 # METHOD_NAME="RecDMoN_qwen"
 # EMB_MODEL="Qwen3-Embedding-0.6B"
 METHOD_NAME="RecDMoN_t5"
@@ -47,6 +47,21 @@ GENSID_CKPT_PATH="ckpt/gensid"
 CF_EMB="${GENSID_CKPT_PATH}/${DATASET}-32d-SASRec.pt"
 
 GR_PATH="${GR_CACHE_DIR}/$(get_dataset_prefix "${DATASET}")${DATASET}/processed"
+
+# Amazon data is selected by category; MIND and Yelp are standalone datasets.
+case "${DATASET}" in
+  Musical_Instruments|Beauty|Toys_and_Games|Sports_and_Outdoors|Books)
+    GENREC_DATASET_ARGS="--dataset=AmazonReviews2014 --category='${DATASET}'"
+    ;;
+  MIND|Yelp)
+    GENREC_DATASET_ARGS="--dataset='${DATASET}'"
+    ;;
+  *)
+    echo "Unsupported DATASET='${DATASET}'"
+    echo "Choose an Amazon category, MIND, or Yelp."
+    exit 2
+    ;;
+esac
 
 DEVICE_NO=0
 DEVICE="cuda:${DEVICE_NO}"
@@ -157,8 +172,7 @@ for SEED in "${SEEDS[@]}"; do
       --num_processes 1 main_genrec.py \
       --final_metrics_file='${FINAL_METRICS_FILE}'\
       --model=TIGER \
-      --dataset=AmazonReviews2014 \
-      --category='${DATASET}' \
+      ${GENREC_DATASET_ARGS} \
       --max_item_seq_len=20 \
       --val_eval_user_limit=0.2 \
       --train_batch_size=512 \
