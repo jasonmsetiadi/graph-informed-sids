@@ -123,7 +123,7 @@ if __name__ == "__main__":
         encode_sent_emb(dataset, sent_emb_path, config)
 
     # Prepare LETTER-like dataset folder
-    dataset_id = dataset if config.get("category") is None else config.get("category")
+    dataset_id = args.dataset if config.get("category") is None else config.get("category")
     prepare_letter_format(
         args.dataset,
         config.get("category"),
