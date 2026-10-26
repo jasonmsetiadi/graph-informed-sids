@@ -6,7 +6,6 @@ import scipy.sparse as sp
 import torch
 from scipy.sparse.linalg import eigsh
 from torch import Tensor
-from torch_cluster import random_walk
 from torch_geometric.data import Data
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
@@ -145,7 +144,23 @@ def build_bipartite_rw_item_graph(
     start_items = torch.arange(num_items, dtype=torch.long)
     start = start_items.repeat_interleave(walks_per_item)
 
-    rw = random_walk(row, col, start=start, walk_length=walk_length)
+    # Convert the edge list to CSR format for pyg-lib.
+    num_nodes = num_items + user_map.height
+    perm = torch.argsort(row, stable=True)
+    row_sorted = row[perm]
+    col_sorted = col[perm]
+
+    counts = torch.bincount(row_sorted, minlength=num_nodes)
+    rowptr = torch.cat([
+        torch.zeros(1, dtype=torch.long),
+        counts.cumsum(0),
+    ])
+
+    # pyg-lib random_walk returns the starting node plus walk_length steps.
+    rw = torch.ops.pyg.random_walk(
+        rowptr, col_sorted, start, walk_length, 1.0, 1.0
+    )
+
     item_walks = rw[:, ::2].numpy()
 
     item_ids = item_map.sort("item_node")["item_id"].to_numpy()
