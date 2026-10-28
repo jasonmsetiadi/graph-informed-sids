@@ -29,6 +29,14 @@ METHOD_NAME="RecDMoN_t5"
 EMB_MODEL="sentence-t5-base"
 SEEDS=(42 43 44)
 
+# Select one or more supported graph clustering methods here.
+CLUSTERING_METHODS=(
+  # stacked_dmon (requires CLUSTER_SIZES below)
+  recursive_spectral
+  # recursive_dmon
+)
+CLUSTER_SIZES=(216 36 6 1)
+
 GENSID_DIR="./gensid"
 
 get_dataset_prefix() {
@@ -70,9 +78,11 @@ mkdir -p "logs/env"
 
 for SEED in "${SEEDS[@]}"; do
   [[ "${PIPELINE_FAILED}" -ne 0 ]] && break
+  for CLUSTERING_METHOD in "${CLUSTERING_METHODS[@]}"; do
+  [[ "${PIPELINE_FAILED}" -ne 0 ]] && break
 
   # Alias identifies every artifact from this run.
-  ALIAS="${METHOD_NAME}_${DATASET}_seed${SEED}"
+  ALIAS="${METHOD_NAME}_${CLUSTERING_METHOD}_${DATASET}_seed${SEED}"
   INDEX_FILE=".${ALIAS}.index.json"
 
   OUT_DIR="${GENSID_CACHE_DIR}/mincut_runs/${ALIAS}"
@@ -94,6 +104,11 @@ for SEED in "${SEEDS[@]}"; do
   echo "Alias:   ${ALIAS}"
   echo "########################################"
 
+  CLUSTERING_ARGS=(--method "${CLUSTERING_METHOD}")
+  if [[ "${CLUSTERING_METHOD}" == "stacked_dmon" ]]; then
+    CLUSTERING_ARGS+=(--cluster_sizes "${CLUSTER_SIZES[@]}")
+  fi
+
   # =========================
   # STEP 1.1: GRAPH CLUSTERING
   # =========================
@@ -101,7 +116,7 @@ for SEED in "${SEEDS[@]}"; do
     python "${GENSID_DIR}/hierarchical_mincut_clustering.py" \
       --interactions_path "${INTERACTIONS_PATH}" \
       --embeddings_path "${DATA_PATH}" \
-      --method recursive_dmon \
+      "${CLUSTERING_ARGS[@]}" \
       --graph_type adjacent_cooc \
       --recursive_factor 6 \
       --recursive_levels 4 \
@@ -185,6 +200,7 @@ for SEED in "${SEEDS[@]}"; do
       2>&1 | tee '${LOG_FILE}'
     "
   fi
+  done
 done
 
 echo

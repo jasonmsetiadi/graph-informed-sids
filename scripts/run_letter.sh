@@ -21,7 +21,7 @@ run_step() {
   local step_name="$1"; shift
   [[ "${PIPELINE_FAILED}" -ne 0 ]] && return 0
   echo -e "\n=== ${step_name} ==="
-  if "$@" >> "$LOG_FILE" 2>&1; then
+  if "$@" 2>&1 | tee -a "$LOG_FILE"; then
     echo "✅ Step OK: ${step_name}"
   else
     local status=$?
@@ -34,8 +34,8 @@ run_step() {
 # Configuration
 # ============================================================
 
-# DATASETS=("Beauty" "Toys_and_Games" "Sports_and_Outdoors" "MIND")
-DATASETS=("Beauty")
+# Select one dataset with DATASET=<name>, matching run_recdmon.sh.
+: "${DATASET:?Set DATASET to an Amazon category, MIND, or Yelp}"
 SEEDS=(42 43 44)
 
 METHOD_NAME="LETTER_t5"
@@ -107,6 +107,20 @@ get_gr_dataset_args() {
   esac
 }
 
+validate_dataset() {
+  local dataset="$1"
+  case "${dataset}" in
+    Musical_Instruments|Beauty|Toys_and_Games|Sports_and_Outdoors|Books|MIND|Yelp)
+      return 0
+      ;;
+    *)
+      echo "Unsupported DATASET='${dataset}'" >&2
+      echo "Choose an Amazon category, MIND, or Yelp." >&2
+      return 1
+      ;;
+  esac
+}
+
 # ============================================================
 # Core pipeline function
 # Usage: run_pipeline <dataset> <seed> <rqvae_preset>
@@ -148,7 +162,7 @@ prepare_cf_embeddings() {
       --n_embd=32 \
       --max_item_seq_len=20 \
       --rand_seed='${SEED}' \
-      --train_batch_size=512 \
+      --train_batch_size=256 \
       --eval_batch_size=32
     "
 
@@ -289,6 +303,8 @@ RQVAE_PRESETS=(
 
 MAX_PARALLEL=3   # max concurrent runs on this device
 
+validate_dataset "${DATASET}" || exit 2
+
 # Semaphore via a bounded background job pool
 _sem_wait() {
   while [[ "$(jobs -rp | wc -l)" -ge "${MAX_PARALLEL}" ]]; do
@@ -296,21 +312,17 @@ _sem_wait() {
   done
 }
 
-for DATASET in "${DATASETS[@]}"; do
-    # Prepare CF embeddings once per dataset (on the first seed iteration)
-    _sem_wait
-    prepare_cf_embeddings "${DATASET}" "${SEEDS[0]}"
-done
+# Prepare CF embeddings once for the selected dataset.
+_sem_wait
+prepare_cf_embeddings "${DATASET}" "${SEEDS[0]}"
 
 wait
 
 for SEED in "${SEEDS[@]}"; do
-  for DATASET in "${DATASETS[@]}"; do
-    for PRESET in "${RQVAE_PRESETS[@]}"; do
-      [[ "${PIPELINE_FAILED}" -ne 0 ]] && break 3
-      _sem_wait
-      run_pipeline "${DATASET}" "${SEED}" "${PRESET}" &
-    done
+  for PRESET in "${RQVAE_PRESETS[@]}"; do
+    [[ "${PIPELINE_FAILED}" -ne 0 ]] && break 2
+    _sem_wait
+    run_pipeline "${DATASET}" "${SEED}" "${PRESET}" &
   done
 done
 

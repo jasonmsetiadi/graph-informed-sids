@@ -20,7 +20,7 @@ run_step() {
   local step_name="$1"; shift
   [[ "${PIPELINE_FAILED}" -ne 0 ]] && return 0
   echo -e "\n=== ${step_name} ==="
-  if "$@" >> "$LOG_FILE" 2>&1; then
+  if "$@" 2>&1 | tee -a "$LOG_FILE"; then
     echo "✅ Step OK: ${step_name}"
   else
     local status=$?
@@ -33,8 +33,8 @@ run_step() {
 # Configuration
 # ============================================================
 
-# DATASETS=("Beauty" "Toys_and_Games" "Sports_and_Outdoors" "MIND")
-DATASETS=("Beauty")
+# Match run_recdmon.sh: require a dataset selected with DATASET=<name>.
+: "${DATASET:?Set DATASET to an Amazon category, MIND, or Yelp}"
 SEEDS=(42 43 44)
 METHOD_NAME="GAE_t5"
 EMB_MODEL="sentence-t5-base"
@@ -149,12 +149,26 @@ get_gr_dataset_args() {
   esac
 }
 
+validate_dataset() {
+  local dataset="$1"
+  case "${dataset}" in
+    Musical_Instruments|Beauty|Toys_and_Games|Sports_and_Outdoors|Books|MIND|Yelp)
+      return 0
+      ;;
+    *)
+      echo "Unsupported DATASET='${dataset}'" >&2
+      echo "Choose an Amazon category, MIND, or Yelp." >&2
+      return 1
+      ;;
+  esac
+}
+
 # ============================================================
 # Core pipeline function
 # Usage: run_pipeline <dataset> <seed> <rqvae_preset>
 # ============================================================
 
-# Parse --skip=step1,step2,... from CLI args
+# Parse --skip=step1,step2,... from CLI args.
 SKIP_STEPS=()
 for arg in "$@"; do
   case "${arg}" in
@@ -292,9 +306,9 @@ PY
 
 # Edit this array to select which presets to run
 RQVAE_PRESETS=(
-  rqvae_args_full
-  rqvae_args_no_graph
-  rqvae_args_no_edge
+  # rqvae_args_full
+  # rqvae_args_no_graph
+  # rqvae_args_no_edge
   rqvae_args_minimal
 )
 
@@ -302,7 +316,9 @@ RQVAE_PRESETS=(
 # Parallelism control
 # ============================================================
 
-MAX_PARALLEL=3   # max concurrent runs on this device
+MAX_PARALLEL=1   # max concurrent runs on this device
+
+validate_dataset "${DATASET}" || exit 2
 
 # Semaphore via a bounded background job pool
 _sem_wait() {
@@ -312,12 +328,10 @@ _sem_wait() {
 }
 
 for SEED in "${SEEDS[@]}"; do
-  for DATASET in "${DATASETS[@]}"; do
-    for PRESET in "${RQVAE_PRESETS[@]}"; do
-      [[ "${PIPELINE_FAILED}" -ne 0 ]] && break 3
-      _sem_wait
-      run_pipeline "${DATASET}" "${SEED}" "${PRESET}" &
-    done
+  for PRESET in "${RQVAE_PRESETS[@]}"; do
+    [[ "${PIPELINE_FAILED}" -ne 0 ]] && break 2
+    _sem_wait
+    run_pipeline "${DATASET}" "${SEED}" "${PRESET}" &
   done
 done
 
