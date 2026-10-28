@@ -32,10 +32,12 @@ SEEDS=(42 43 44)
 # Select one or more supported graph clustering methods here.
 CLUSTERING_METHODS=(
   # stacked_dmon (requires CLUSTER_SIZES below)
-  recursive_spectral
-  # recursive_dmon
+  # recursive_spectral
+  recursive_dmon
 )
 CLUSTER_SIZES=(216 36 6 1)
+SPECTRAL_SEMANTIC_WEIGHT=0.5
+SPECTRAL_SEMANTIC_KNN=20
 
 GENSID_DIR="./gensid"
 
@@ -107,6 +109,11 @@ for SEED in "${SEEDS[@]}"; do
   CLUSTERING_ARGS=(--method "${CLUSTERING_METHOD}")
   if [[ "${CLUSTERING_METHOD}" == "stacked_dmon" ]]; then
     CLUSTERING_ARGS+=(--cluster_sizes "${CLUSTER_SIZES[@]}")
+  elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
+    CLUSTERING_ARGS+=(
+      --spectral_semantic_weight "${SPECTRAL_SEMANTIC_WEIGHT}"
+      --spectral_semantic_knn "${SPECTRAL_SEMANTIC_KNN}"
+    )
   fi
 
   # =========================
