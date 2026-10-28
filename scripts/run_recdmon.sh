@@ -149,7 +149,7 @@ for SEED in "${SEEDS[@]}"; do
   # STEP 1.1: GRAPH CLUSTERING
   # =========================
   run_step "Graph clustering (MinCut)" \
-    python "${GENSID_DIR}/hierarchical_mincut_clustering.py" \
+    python -u "${GENSID_DIR}/hierarchical_mincut_clustering.py" \
       --interactions_path "${INTERACTIONS_PATH}" \
       --embeddings_path "${DATA_PATH}" \
       "${CLUSTERING_ARGS[@]}" \

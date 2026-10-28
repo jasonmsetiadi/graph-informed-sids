@@ -486,7 +486,7 @@ def leiden_cluster_subset(
 
     resolutions = np.geomspace(resolution_min, resolution_max, num=resolution_points)
     candidates: List[Tuple[float, np.ndarray, int]] = []
-    for resolution in resolutions:
+    for resolution_idx, resolution in enumerate(resolutions, start=1):
         partition = la.find_partition(
             graph,
             la.RBConfigurationVertexPartition,
@@ -498,6 +498,11 @@ def leiden_cluster_subset(
         labels = relabel_compact(np.asarray(partition.membership, dtype=np.int64))
         num_communities = int(len(np.unique(labels)))
         candidates.append((float(resolution), labels, num_communities))
+        print(
+            f"  Leiden resolution {resolution_idx}/{resolution_points}: "
+            f"gamma={resolution:.6g}, communities={num_communities}",
+            flush=True,
+        )
 
     plateaus: List[Tuple[int, int]] = []
     plateau_start = 0
@@ -776,6 +781,10 @@ def recursive_leiden_hierarchy(
         for parent in [p for p in np.unique(parent_labels).tolist() if p >= 0]:
             subset = np.where(parent_labels == parent)[0].astype(np.int64)
             if parent in active_parents:
+                print(
+                    f"Leiden level {level}, parent {parent}: scanning {len(subset)} nodes",
+                    flush=True,
+                )
                 local, local_history = leiden_cluster_subset(
                     A=A,
                     subset=subset,
@@ -816,7 +825,10 @@ def recursive_leiden_hierarchy(
             break
 
         hierarchy.append(new_labels)
-        print(f"recursive Leiden level {level}: clusters={len(np.unique(new_labels[new_labels >= 0]))}")
+        print(
+            f"recursive Leiden level {level}: clusters={len(np.unique(new_labels[new_labels >= 0]))}",
+            flush=True,
+        )
         parent_labels = new_labels
         active_parents = next_active_parents
         level += 1
