@@ -36,7 +36,17 @@ from typing import Any
 import numpy as np
 
 
-DEFAULT_PREFIXES = ["<a_{}>", "<b_{}>", "<c_{}>", "<d_{}>", "<e_{}>", "<f_{}>", "<g_{}>", "<h_{}>"]
+def make_default_prefixes(num_levels: int) -> list[str]:
+    """Create alphabetic token prefixes without imposing a hierarchy-depth limit."""
+    prefixes = []
+    for index in range(num_levels):
+        value = index + 1
+        letters = ""
+        while value > 0:
+            value, remainder = divmod(value - 1, 26)
+            letters = chr(ord("a") + remainder) + letters
+        prefixes.append(f"<{letters}_{{}}>")
+    return prefixes
 
 
 def _is_label_vector(x: Any) -> bool:
@@ -263,7 +273,7 @@ def main():
     if args.reindex_contiguous:
         labels, remap_maps = make_contiguous_per_level(labels, keep_negative=True)
 
-    prefixes = args.prefixes if args.prefixes is not None else DEFAULT_PREFIXES
+    prefixes = args.prefixes if args.prefixes is not None else make_default_prefixes(len(labels))
 
     codes = build_codes(
         labels=labels,

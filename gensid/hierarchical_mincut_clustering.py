@@ -7,9 +7,10 @@ Graph input is built only through graph_utils.InteractionGraphBuilder.
 Methods:
   - stacked_dmon: explicit dense stacked DMoN hierarchy with --cluster_sizes fine->coarse.
   - recursive_spectral: top-down recursive spectral splits.
+  - recursive_leiden: top-down recursive Leiden community detection splits.
   - recursive_dmon: top-down recursive local DMoN-style modularity splits.
 
-For recursive methods, hierarchy is controlled by:
+For recursive spectral and DMoN methods, hierarchy is controlled by:
   --recursive_factor F
   --recursive_levels L
 
@@ -21,6 +22,10 @@ This creates coarse-to-fine partitions with target cluster counts roughly:
 
 Each parent cluster is split into up to F child clusters. Small parents with fewer
 than F nodes are split into singleton-like clusters as needed.
+
+For recursive Leiden, each parent is instead split at a stable resolution selected
+from a log-spaced scan. The number of children and hierarchy depth are determined
+by the graph. A branch stops when Leiden returns one community.
 
 Main output:
   <output_dir>/<output_prefix>_labels.json
@@ -253,16 +258,30 @@ def save_outputs(
     if args.method.startswith("recursive"):
         metadata.update(
             {
-                "recursive_factor": int(args.recursive_factor),
-                "recursive_levels": int(args.recursive_levels),
                 "cluster_counts_coarse_to_fine": [int(len(np.unique(x[x >= 0]))) for x in graph_labels_coarse_to_fine],
             }
         )
+        if args.method == "recursive_leiden":
+            metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
+        else:
+            metadata["recursive_factor"] = int(args.recursive_factor)
+            metadata["recursive_levels"] = int(args.recursive_levels)
         if args.method == "recursive_spectral":
             metadata.update(
                 {
                     "spectral_semantic_weight": float(args.spectral_semantic_weight),
                     "spectral_semantic_knn": int(args.spectral_semantic_knn),
+                }
+            )
+        elif args.method == "recursive_leiden":
+            metadata.update(
+                {
+                    "leiden_resolution_min": float(args.leiden_resolution_min),
+                    "leiden_resolution_max": float(args.leiden_resolution_max),
+                    "leiden_resolution_points": int(args.leiden_resolution_points),
+                    "leiden_plateau_tolerance": float(args.leiden_plateau_tolerance),
+                    "leiden_iterations": int(args.leiden_iterations),
+                    "leiden_selection": "widest_nonsaturated_community_count_plateau",
                 }
             )
     else:
@@ -403,6 +422,135 @@ def spectral_cluster_subset(
 
     labels = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(Z)
     return labels.astype(np.int64)
+
+
+# -----------------------------------------------------------------------------
+# Recursive Leiden clustering
+# -----------------------------------------------------------------------------
+
+
+def leiden_cluster_subset(
+    A: sp.csr_matrix,
+    subset: np.ndarray,
+    seed: int,
+    resolution_min: float,
+    resolution_max: float,
+    resolution_points: int,
+    plateau_tolerance: float,
+    n_iterations: int,
+) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+    """Run Leiden over a resolution grid and select a stable nontrivial plateau."""
+    try:
+        import igraph as ig
+        import leidenalg as la
+    except ImportError as exc:
+        raise ImportError(
+            "recursive_leiden requires the 'igraph' and 'leidenalg' packages. "
+            "Install the dependencies from requirements.txt."
+        ) from exc
+
+    n = int(len(subset))
+    if n == 0:
+        return np.empty((0,), dtype=np.int64), []
+    if n == 1:
+        return np.zeros((n,), dtype=np.int64), []
+    if resolution_min <= 0.0:
+        raise ValueError("--leiden_resolution_min must be > 0")
+    if resolution_max <= resolution_min:
+        raise ValueError("--leiden_resolution_max must be greater than --leiden_resolution_min")
+    if resolution_points < 2:
+        raise ValueError("--leiden_resolution_points must be >= 2")
+    if plateau_tolerance < 0.0:
+        raise ValueError("--leiden_plateau_tolerance must be >= 0")
+    if n_iterations == 0:
+        raise ValueError("--leiden_iterations must be positive, or negative to run until convergence")
+
+    A_sub = A[subset][:, subset].astype(np.float64).tocsr()
+    A_upper = sp.triu(A_sub, k=1, format="coo")
+    weights = A_upper.data.astype(np.float64, copy=False)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("Leiden received non-finite edge weights")
+    if np.any(weights < 0.0):
+        raise ValueError("Leiden RB configuration clustering requires non-negative edge weights")
+
+    keep = weights > 0.0
+    rows = A_upper.row[keep]
+    cols = A_upper.col[keep]
+    weights = weights[keep]
+    if weights.size == 0:
+        return np.arange(n, dtype=np.int64), []
+
+    edges = np.column_stack((rows, cols)).tolist()
+    graph = ig.Graph(n=n, edges=edges, directed=False)
+    graph.es["weight"] = weights.tolist()
+
+    resolutions = np.geomspace(resolution_min, resolution_max, num=resolution_points)
+    candidates: List[Tuple[float, np.ndarray, int]] = []
+    for resolution in resolutions:
+        partition = la.find_partition(
+            graph,
+            la.RBConfigurationVertexPartition,
+            weights="weight",
+            resolution_parameter=resolution,
+            n_iterations=n_iterations,
+            seed=seed,
+        )
+        labels = relabel_compact(np.asarray(partition.membership, dtype=np.int64))
+        num_communities = int(len(np.unique(labels)))
+        candidates.append((float(resolution), labels, num_communities))
+
+    plateaus: List[Tuple[int, int]] = []
+    plateau_start = 0
+    for idx in range(1, len(candidates)):
+        previous_count = candidates[idx - 1][2]
+        current_count = candidates[idx][2]
+        relative_change = abs(current_count - previous_count) / max(previous_count, current_count, 1)
+        if relative_change > plateau_tolerance:
+            plateaus.append((plateau_start, idx - 1))
+            plateau_start = idx
+    plateaus.append((plateau_start, len(candidates) - 1))
+
+    # The one-community plateau is a valid natural stopping signal. Ignore only
+    # all-singleton saturation when another stable regime exists.
+    nonsaturated_plateaus = [
+        (start, end)
+        for start, end in plateaus
+        if any(candidates[idx][2] < n for idx in range(start, end + 1))
+    ]
+    eligible_plateaus = nonsaturated_plateaus or plateaus
+    selected_start, selected_end = max(
+        eligible_plateaus,
+        key=lambda bounds: (
+            np.log(candidates[bounds[1]][0]) - np.log(candidates[bounds[0]][0]),
+            bounds[1] - bounds[0] + 1,
+            -bounds[0],
+        ),
+    )
+
+    plateau_midpoint = (selected_start + selected_end) / 2.0
+    eligible_indices = [
+        idx
+        for idx in range(selected_start, selected_end + 1)
+        if candidates[idx][2] < n
+    ]
+    if not eligible_indices:
+        eligible_indices = list(range(selected_start, selected_end + 1))
+    selected_idx = min(eligible_indices, key=lambda idx: (abs(idx - plateau_midpoint), idx))
+    _, labels, _ = candidates[selected_idx]
+
+    history = []
+    for idx, (resolution, _, num_communities) in enumerate(candidates):
+        history.append(
+            {
+                "resolution": float(resolution),
+                "clusters": float(num_communities),
+                "subset_size": float(n),
+                "selected": float(idx == selected_idx),
+                "selected_plateau_start": float(candidates[selected_start][0]),
+                "selected_plateau_end": float(candidates[selected_end][0]),
+            }
+        )
+    return labels, history
 
 
 # -----------------------------------------------------------------------------
@@ -600,6 +748,78 @@ def recursive_hierarchy(
         hierarchy.append(new_labels)
         parent_labels = new_labels
         print(f"recursive level {level}: clusters={len(np.unique(new_labels[new_labels >= 0]))}")
+
+    return hierarchy, history
+
+
+def recursive_leiden_hierarchy(
+    x: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor | None,
+    args: argparse.Namespace,
+) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
+    """Recursively split active Leiden communities until every branch stops naturally."""
+    n = x.size(0)
+    A = edge_index_to_sparse_adj(edge_index, edge_weight, n)
+    parent_labels = np.zeros(n, dtype=np.int64)
+    active_parents = {0}
+    hierarchy: List[np.ndarray] = []
+    history: List[Dict[str, float]] = []
+    level = 1
+
+    while active_parents:
+        new_labels = np.full(n, -1, dtype=np.int64)
+        next_active_parents = set()
+        next_cluster_id = 0
+        any_split = False
+
+        for parent in [p for p in np.unique(parent_labels).tolist() if p >= 0]:
+            subset = np.where(parent_labels == parent)[0].astype(np.int64)
+            if parent in active_parents:
+                local, local_history = leiden_cluster_subset(
+                    A=A,
+                    subset=subset,
+                    seed=int(args.seed) + level * 1009 + int(parent),
+                    resolution_min=args.leiden_resolution_min,
+                    resolution_max=args.leiden_resolution_max,
+                    resolution_points=args.leiden_resolution_points,
+                    plateau_tolerance=args.leiden_plateau_tolerance,
+                    n_iterations=args.leiden_iterations,
+                )
+            else:
+                local = np.zeros(len(subset), dtype=np.int64)
+                local_history = []
+
+            local_ids = sorted(np.unique(local).tolist())
+            parent_split = len(local_ids) > 1
+            any_split = any_split or parent_split
+
+            for local_id in local_ids:
+                mask = local == local_id
+                child_id = next_cluster_id
+                new_labels[subset[mask]] = child_id
+                next_cluster_id += 1
+                if parent_split and int(mask.sum()) > 1:
+                    next_active_parents.add(child_id)
+
+            for row in local_history:
+                row = dict(row)
+                row["level"] = float(level)
+                row["parent"] = float(parent)
+                history.append(row)
+
+        new_labels = relabel_compact(new_labels)
+        if not any_split:
+            if not hierarchy:
+                hierarchy.append(new_labels)
+                print("recursive Leiden stopped at root: clusters=1")
+            break
+
+        hierarchy.append(new_labels)
+        print(f"recursive Leiden level {level}: clusters={len(np.unique(new_labels[new_labels >= 0]))}")
+        parent_labels = new_labels
+        active_parents = next_active_parents
+        level += 1
 
     return hierarchy, history
 
@@ -836,7 +1056,7 @@ def parse_args() -> argparse.Namespace:
         "--method",
         type=str,
         default="stacked_dmon",
-        choices=["stacked_dmon", "recursive_spectral", "recursive_dmon"],
+        choices=["stacked_dmon", "recursive_spectral", "recursive_leiden", "recursive_dmon"],
     )
 
     src = parser.add_mutually_exclusive_group(required=True)
@@ -875,6 +1095,36 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="For recursive_spectral, number of cosine-similarity neighbors per item.",
+    )
+    parser.add_argument(
+        "--leiden_resolution_min",
+        type=float,
+        default=0.01,
+        help="Lower bound of the recursive_leiden log-spaced resolution scan.",
+    )
+    parser.add_argument(
+        "--leiden_resolution_max",
+        type=float,
+        default=100.0,
+        help="Upper bound of the recursive_leiden log-spaced resolution scan.",
+    )
+    parser.add_argument(
+        "--leiden_resolution_points",
+        type=int,
+        default=41,
+        help="Number of resolutions evaluated by recursive_leiden.",
+    )
+    parser.add_argument(
+        "--leiden_plateau_tolerance",
+        type=float,
+        default=0.05,
+        help="Maximum relative community-count change between adjacent points in one stable plateau.",
+    )
+    parser.add_argument(
+        "--leiden_iterations",
+        type=int,
+        default=-1,
+        help="Leiden optimization iterations; a negative value runs until convergence.",
     )
     parser.add_argument("--dmon_balance_weight", type=float, default=1.0)
     parser.add_argument("--dmon_entropy_weight", type=float, default=0.01)
@@ -917,6 +1167,14 @@ def main() -> None:
 
     if args.method == "stacked_dmon":
         labels_c2f, history, artifacts = run_stacked_dmon(args, x_graph, edge_index, edge_weight, device)
+    elif args.method == "recursive_leiden":
+        labels_c2f, history = recursive_leiden_hierarchy(
+            x=x_graph,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
+            args=args,
+        )
+        artifacts = {}
     else:
         labels_c2f, history = recursive_hierarchy(
             method=args.method,

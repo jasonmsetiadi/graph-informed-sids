@@ -2,6 +2,18 @@
 set -euo pipefail
 
 
+CLUSTERING_METHOD="${1:-${CLUSTERING_METHOD:-recursive_dmon}}"
+
+case "${CLUSTERING_METHOD}" in
+  stacked_dmon|recursive_spectral|recursive_leiden|recursive_dmon) ;;
+  *)
+    echo "Unsupported clustering method: ${CLUSTERING_METHOD}" >&2
+    echo "Choose stacked_dmon, recursive_spectral, recursive_leiden, or recursive_dmon." >&2
+    exit 2
+    ;;
+esac
+
+
 PIPELINE_FAILED=0
 
 run_step () {
@@ -29,15 +41,17 @@ METHOD_NAME="RecDMoN_t5"
 EMB_MODEL="sentence-t5-base"
 SEEDS=(42 43 44)
 
-# Select one or more supported graph clustering methods here.
-CLUSTERING_METHODS=(
-  # stacked_dmon (requires CLUSTER_SIZES below)
-  # recursive_spectral
-  recursive_dmon
-)
+CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
 SPECTRAL_SEMANTIC_WEIGHT=0.5
 SPECTRAL_SEMANTIC_KNN=20
+LEIDEN_RESOLUTION_MIN=0.01
+LEIDEN_RESOLUTION_MAX=100.0
+LEIDEN_RESOLUTION_POINTS=41
+LEIDEN_PLATEAU_TOLERANCE=0.05
+LEIDEN_ITERATIONS=-1
+RECURSIVE_FACTOR=6
+RECURSIVE_LEVELS=4
 
 GENSID_DIR="./gensid"
 
@@ -111,8 +125,23 @@ for SEED in "${SEEDS[@]}"; do
     CLUSTERING_ARGS+=(--cluster_sizes "${CLUSTER_SIZES[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
     CLUSTERING_ARGS+=(
+      --recursive_factor "${RECURSIVE_FACTOR}"
+      --recursive_levels "${RECURSIVE_LEVELS}"
       --spectral_semantic_weight "${SPECTRAL_SEMANTIC_WEIGHT}"
       --spectral_semantic_knn "${SPECTRAL_SEMANTIC_KNN}"
+    )
+  elif [[ "${CLUSTERING_METHOD}" == "recursive_leiden" ]]; then
+    CLUSTERING_ARGS+=(
+      --leiden_resolution_min "${LEIDEN_RESOLUTION_MIN}"
+      --leiden_resolution_max "${LEIDEN_RESOLUTION_MAX}"
+      --leiden_resolution_points "${LEIDEN_RESOLUTION_POINTS}"
+      --leiden_plateau_tolerance "${LEIDEN_PLATEAU_TOLERANCE}"
+      --leiden_iterations "${LEIDEN_ITERATIONS}"
+    )
+  elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
+    CLUSTERING_ARGS+=(
+      --recursive_factor "${RECURSIVE_FACTOR}"
+      --recursive_levels "${RECURSIVE_LEVELS}"
     )
   fi
 
@@ -125,8 +154,6 @@ for SEED in "${SEEDS[@]}"; do
       --embeddings_path "${DATA_PATH}" \
       "${CLUSTERING_ARGS[@]}" \
       --graph_type adjacent_cooc \
-      --recursive_factor 6 \
-      --recursive_levels 4 \
       --lr 3e-4 \
       --assign_hidden_dim 256 \
       --dropout 0.0 \
@@ -144,7 +171,6 @@ for SEED in "${SEEDS[@]}"; do
       --labels_path "${LABELS_PATH}" \
       --output_file "${GENSID_CACHE_DIR}/${DATASET}/${DATASET}${INDEX_FILE}" \
       --label_group coarse_to_fine_item_labels \
-      --levels level_1 level_2 level_3 level_4 \
       --unclustered_strategy special \
       --append_unique_leaf
 
