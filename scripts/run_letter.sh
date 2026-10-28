@@ -73,13 +73,13 @@ letter() {
     --beta 0.0 \
     --layers 512 256 128 64 \
     --eval_step 100 \
-    --num_prop 1 \
-    --appnp_alpha 0.5 \
-    --use_edge_weight \
-    --graph_signal \
-    --disable_vq_init \
-    --cf_loss_use_codebook_rep \
-    --use_edge_reconstruction_loss
+    --cf_loss_use_codebook_rep
+    # --disable_vq_init \
+    # --num_prop 1 \
+    # --appnp_alpha 0.5 \
+    # --use_edge_weight \
+    # --graph_signal \
+    # --use_edge_reconstruction_loss
 }
 
 # ============================================================
@@ -217,6 +217,7 @@ run_pipeline() {
       --device="cuda:${DEVICE_NO}" \
       --dataset="${DATASET}" \
       --embedder="${EMB_MODEL}" \
+      --cf_emb="${CF_EMB}" \
       --saved_model_dir="${SAVE_MODEL_DIR}" \
       --global_seed="${SEED}" \
       "${RQVAE_EXTRA_ARGS[@]}"
