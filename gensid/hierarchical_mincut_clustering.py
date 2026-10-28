@@ -280,8 +280,9 @@ def save_outputs(
                     "leiden_resolution_max": float(args.leiden_resolution_max),
                     "leiden_resolution_points": int(args.leiden_resolution_points),
                     "leiden_plateau_tolerance": float(args.leiden_plateau_tolerance),
+                    "leiden_early_stop_patience": int(args.leiden_early_stop_patience),
                     "leiden_iterations": int(args.leiden_iterations),
-                    "leiden_selection": "widest_nonsaturated_community_count_plateau",
+                    "leiden_selection": "widest_stable_nontrivial_plateau_else_natural_stop",
                 }
             )
     else:
@@ -437,6 +438,7 @@ def leiden_cluster_subset(
     resolution_max: float,
     resolution_points: int,
     plateau_tolerance: float,
+    early_stop_patience: int,
     n_iterations: int,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Run Leiden over a resolution grid and select a stable nontrivial plateau."""
@@ -462,6 +464,8 @@ def leiden_cluster_subset(
         raise ValueError("--leiden_resolution_points must be >= 2")
     if plateau_tolerance < 0.0:
         raise ValueError("--leiden_plateau_tolerance must be >= 0")
+    if early_stop_patience < 0:
+        raise ValueError("--leiden_early_stop_patience must be >= 0")
     if n_iterations == 0:
         raise ValueError("--leiden_iterations must be positive, or negative to run until convergence")
 
@@ -486,6 +490,8 @@ def leiden_cluster_subset(
 
     resolutions = np.geomspace(resolution_min, resolution_max, num=resolution_points)
     candidates: List[Tuple[float, np.ndarray, int]] = []
+    stable_nontrivial_seen = False
+    unstable_streak = 0
     for resolution_idx, resolution in enumerate(resolutions, start=1):
         partition = la.find_partition(
             graph,
@@ -503,6 +509,29 @@ def leiden_cluster_subset(
             f"gamma={resolution:.6g}, communities={num_communities}",
             flush=True,
         )
+        if len(candidates) >= 2:
+            previous_count = candidates[-2][2]
+            relative_change = abs(num_communities - previous_count) / max(
+                previous_count,
+                num_communities,
+                1,
+            )
+            stable_transition = relative_change <= plateau_tolerance
+            if stable_transition and 1 < previous_count < n and 1 < num_communities < n:
+                stable_nontrivial_seen = True
+                unstable_streak = 0
+            elif stable_nontrivial_seen and not stable_transition:
+                unstable_streak += 1
+            elif stable_nontrivial_seen:
+                unstable_streak = 0
+
+            if early_stop_patience > 0 and stable_nontrivial_seen and unstable_streak >= early_stop_patience:
+                print(
+                    "  Stopping resolution scan early after "
+                    f"{unstable_streak} consecutive unstable transitions.",
+                    flush=True,
+                )
+                break
 
     plateaus: List[Tuple[int, int]] = []
     plateau_start = 0
@@ -515,14 +544,30 @@ def leiden_cluster_subset(
             plateau_start = idx
     plateaus.append((plateau_start, len(candidates) - 1))
 
-    # The one-community plateau is a valid natural stopping signal. Ignore only
-    # all-singleton saturation when another stable regime exists.
+    # Boundary plateaus at one community or all singletons are resolution-range
+    # saturation effects. Prefer a stable, nontrivial interior plateau.
+    stable_nontrivial_plateaus = [
+        (start, end)
+        for start, end in plateaus
+        if end > start
+        and any(1 < candidates[idx][2] < n for idx in range(start, end + 1))
+    ]
+    one_community_plateaus = [
+        (start, end)
+        for start, end in plateaus
+        if all(candidates[idx][2] == 1 for idx in range(start, end + 1))
+    ]
     nonsaturated_plateaus = [
         (start, end)
         for start, end in plateaus
         if any(candidates[idx][2] < n for idx in range(start, end + 1))
     ]
-    eligible_plateaus = nonsaturated_plateaus or plateaus
+    eligible_plateaus = (
+        stable_nontrivial_plateaus
+        or one_community_plateaus
+        or nonsaturated_plateaus
+        or plateaus
+    )
     selected_start, selected_end = max(
         eligible_plateaus,
         key=lambda bounds: (
@@ -536,12 +581,20 @@ def leiden_cluster_subset(
     eligible_indices = [
         idx
         for idx in range(selected_start, selected_end + 1)
-        if candidates[idx][2] < n
+        if 1 < candidates[idx][2] < n
     ]
     if not eligible_indices:
         eligible_indices = list(range(selected_start, selected_end + 1))
     selected_idx = min(eligible_indices, key=lambda idx: (abs(idx - plateau_midpoint), idx))
-    _, labels, _ = candidates[selected_idx]
+    selected_resolution, labels, selected_communities = candidates[selected_idx]
+
+    print(
+        "  Selected Leiden plateau: "
+        f"gamma=[{candidates[selected_start][0]:.6g}, {candidates[selected_end][0]:.6g}], "
+        f"points={selected_end - selected_start + 1}, "
+        f"chosen_gamma={selected_resolution:.6g}, communities={selected_communities}",
+        flush=True,
+    )
 
     history = []
     for idx, (resolution, _, num_communities) in enumerate(candidates):
@@ -793,6 +846,7 @@ def recursive_leiden_hierarchy(
                     resolution_max=args.leiden_resolution_max,
                     resolution_points=args.leiden_resolution_points,
                     plateau_tolerance=args.leiden_plateau_tolerance,
+                    early_stop_patience=args.leiden_early_stop_patience,
                     n_iterations=args.leiden_iterations,
                 )
             else:
@@ -1131,6 +1185,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.05,
         help="Maximum relative community-count change between adjacent points in one stable plateau.",
+    )
+    parser.add_argument(
+        "--leiden_early_stop_patience",
+        type=int,
+        default=10,
+        help="Stop after this many unstable transitions once a stable nontrivial plateau has been found; zero disables.",
     )
     parser.add_argument(
         "--leiden_iterations",

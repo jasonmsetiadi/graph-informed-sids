@@ -49,6 +49,7 @@ LEIDEN_RESOLUTION_MIN=0.01
 LEIDEN_RESOLUTION_MAX=100.0
 LEIDEN_RESOLUTION_POINTS=41
 LEIDEN_PLATEAU_TOLERANCE=0.05
+LEIDEN_EARLY_STOP_PATIENCE=10
 LEIDEN_ITERATIONS=-1
 RECURSIVE_FACTOR=6
 RECURSIVE_LEVELS=4
@@ -136,6 +137,7 @@ for SEED in "${SEEDS[@]}"; do
       --leiden_resolution_max "${LEIDEN_RESOLUTION_MAX}"
       --leiden_resolution_points "${LEIDEN_RESOLUTION_POINTS}"
       --leiden_plateau_tolerance "${LEIDEN_PLATEAU_TOLERANCE}"
+      --leiden_early_stop_patience "${LEIDEN_EARLY_STOP_PATIENCE}"
       --leiden_iterations "${LEIDEN_ITERATIONS}"
     )
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
