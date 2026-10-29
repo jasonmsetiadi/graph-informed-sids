@@ -5,10 +5,10 @@ set -euo pipefail
 CLUSTERING_METHOD="${1:-${CLUSTERING_METHOD:-recursive_dmon}}"
 
 case "${CLUSTERING_METHOD}" in
-  stacked_dmon|recursive_spectral|recursive_leiden|recursive_dmon) ;;
+  stacked_dmon|recursive_spectral|recursive_kmeans|recursive_leiden|recursive_dmon) ;;
   *)
     echo "Unsupported clustering method: ${CLUSTERING_METHOD}" >&2
-    echo "Choose stacked_dmon, recursive_spectral, recursive_leiden, or recursive_dmon." >&2
+    echo "Choose stacked_dmon, recursive_spectral, recursive_kmeans, recursive_leiden, or recursive_dmon." >&2
     exit 2
     ;;
 esac
@@ -45,6 +45,11 @@ CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
 SPECTRAL_SEMANTIC_WEIGHT=0.5
 SPECTRAL_SEMANTIC_KNN=20
+GRAPH_EMBEDDING_METHOD=fastrp
+FASTRP_DIM=256
+FASTRP_FEATURE_WEIGHT=1.0
+FASTRP_ITERATION_WEIGHTS=(0.0 1.0 1.0)
+FASTRP_SEED=42
 LEIDEN_RESOLUTION_MIN=0.01
 LEIDEN_RESOLUTION_MAX=100.0
 LEIDEN_RESOLUTION_POINTS=41
@@ -99,7 +104,11 @@ for SEED in "${SEEDS[@]}"; do
   [[ "${PIPELINE_FAILED}" -ne 0 ]] && break
 
   # Alias identifies every artifact from this run.
-  ALIAS="${METHOD_NAME}_${CLUSTERING_METHOD}_${DATASET}_seed${SEED}"
+  CLUSTERING_LABEL="${CLUSTERING_METHOD}"
+  if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
+    CLUSTERING_LABEL="${CLUSTERING_METHOD}_${GRAPH_EMBEDDING_METHOD}"
+  fi
+  ALIAS="${METHOD_NAME}_${CLUSTERING_LABEL}_${DATASET}_seed${SEED}"
   INDEX_FILE=".${ALIAS}.index.json"
 
   OUT_DIR="${GENSID_CACHE_DIR}/mincut_runs/${ALIAS}"
@@ -130,6 +139,16 @@ for SEED in "${SEEDS[@]}"; do
       --recursive_levels "${RECURSIVE_LEVELS}"
       --spectral_semantic_weight "${SPECTRAL_SEMANTIC_WEIGHT}"
       --spectral_semantic_knn "${SPECTRAL_SEMANTIC_KNN}"
+    )
+  elif [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
+    CLUSTERING_ARGS+=(
+      --recursive_factor "${RECURSIVE_FACTOR}"
+      --recursive_levels "${RECURSIVE_LEVELS}"
+      --graph_embedding_method "${GRAPH_EMBEDDING_METHOD}"
+      --fastrp_dim "${FASTRP_DIM}"
+      --fastrp_feature_weight "${FASTRP_FEATURE_WEIGHT}"
+      --fastrp_iteration_weights "${FASTRP_ITERATION_WEIGHTS[@]}"
+      --fastrp_seed "${FASTRP_SEED}"
     )
   elif [[ "${CLUSTERING_METHOD}" == "recursive_leiden" ]]; then
     CLUSTERING_ARGS+=(

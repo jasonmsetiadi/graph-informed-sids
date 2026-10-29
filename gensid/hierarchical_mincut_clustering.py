@@ -7,10 +7,11 @@ Graph input is built only through graph_utils.InteractionGraphBuilder.
 Methods:
   - stacked_dmon: explicit dense stacked DMoN hierarchy with --cluster_sizes fine->coarse.
   - recursive_spectral: top-down recursive spectral splits.
+  - recursive_kmeans: graph embedding preprocessing followed by top-down KMeans splits.
   - recursive_leiden: top-down recursive Leiden community detection splits.
   - recursive_dmon: top-down recursive local DMoN-style modularity splits.
 
-For recursive spectral and DMoN methods, hierarchy is controlled by:
+For recursive spectral, graph-embedding KMeans, and DMoN methods, hierarchy is controlled by:
   --recursive_factor F
   --recursive_levels L
 
@@ -56,9 +57,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
-from sklearn.neighbors import NearestNeighbors
 from torch_geometric.nn import GCNConv
 
+from graph_aware_sid.adjacency_fusion import build_semantic_knn_adj, fuse_adjacencies
+from graph_aware_sid.graph_embedding import build_graph_embeddings
 from graph_aware_sid.graph_utils import InteractionGraphBuilder, load_train_item_mask
 
 
@@ -273,6 +275,16 @@ def save_outputs(
                     "spectral_semantic_knn": int(args.spectral_semantic_knn),
                 }
             )
+        elif args.method == "recursive_kmeans":
+            metadata.update(
+                {
+                    "graph_embedding_method": args.graph_embedding_method,
+                    "fastrp_dim": int(args.fastrp_dim),
+                    "fastrp_feature_weight": float(args.fastrp_feature_weight),
+                    "fastrp_iteration_weights": [float(x) for x in args.fastrp_iteration_weights],
+                    "fastrp_seed": int(args.fastrp_seed),
+                }
+            )
         elif args.method == "recursive_leiden":
             metadata.update(
                 {
@@ -330,47 +342,6 @@ def save_outputs(
 # -----------------------------------------------------------------------------
 
 
-def build_semantic_knn_adj(x: torch.Tensor, knn: int) -> sp.csr_matrix:
-    """Build a symmetric cosine-similarity kNN graph from item embeddings."""
-    if knn < 1:
-        raise ValueError("--spectral_semantic_knn must be >= 1")
-
-    x_np = x.detach().cpu().numpy().astype(np.float32, copy=False)
-    num_nodes = x_np.shape[0]
-    if num_nodes <= 1:
-        return sp.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
-
-    num_neighbors = min(knn + 1, num_nodes)
-    neighbors = NearestNeighbors(n_neighbors=num_neighbors, metric="cosine", algorithm="brute")
-    neighbors.fit(x_np)
-    distances, indices = neighbors.kneighbors(x_np, return_distance=True)
-
-    row_grid = np.arange(num_nodes, dtype=np.int64)[:, None]
-    non_self = indices != row_grid
-    neighbor_rank = np.cumsum(non_self, axis=1)
-    keep_matrix = non_self & (neighbor_rank <= knn)
-
-    rows = np.repeat(np.arange(num_nodes, dtype=np.int64), num_neighbors)
-    cols = indices.reshape(-1).astype(np.int64, copy=False)
-    similarities = (1.0 - distances.reshape(-1)).astype(np.float64, copy=False)
-    keep = keep_matrix.reshape(-1) & np.isfinite(similarities) & (similarities > 0.0)
-
-    A_semantic = sp.coo_matrix(
-        (similarities[keep], (rows[keep], cols[keep])),
-        shape=(num_nodes, num_nodes),
-    ).tocsr()
-    A_semantic = A_semantic.maximum(A_semantic.T)
-    A_semantic.setdiag(0.0)
-    A_semantic.eliminate_zeros()
-    return A_semantic
-
-
-def normalize_affinity_for_fusion(A: sp.csr_matrix) -> sp.csr_matrix:
-    """Normalize an affinity matrix so fusion weights compare graph views fairly."""
-    norm = float(np.sqrt(A.multiply(A).sum()))
-    return A if norm <= 0.0 else A / norm
-
-
 def spectral_cluster_subset(
     A: sp.csr_matrix,
     A_semantic: sp.csr_matrix | None,
@@ -390,14 +361,7 @@ def spectral_cluster_subset(
     A_sub = A[subset][:, subset].astype(np.float64).tocsr()
     if A_semantic is not None and semantic_weight > 0.0:
         A_semantic_sub = A_semantic[subset][:, subset].astype(np.float64).tocsr()
-        if semantic_weight >= 1.0:
-            A_sub = A_semantic_sub
-        else:
-            A_sub = (
-                (1.0 - semantic_weight) * normalize_affinity_for_fusion(A_sub)
-                + semantic_weight * normalize_affinity_for_fusion(A_semantic_sub)
-            ).tocsr()
-        A_sub.eliminate_zeros()
+        A_sub = fuse_adjacencies(A_sub, A_semantic_sub, semantic_weight)
     if A_sub.nnz == 0:
         # No internal structure: deterministic split by node order inside the subset.
         return np.arange(n, dtype=np.int64) % k
@@ -422,6 +386,26 @@ def spectral_cluster_subset(
         Z = A_sub.toarray()
 
     labels = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(Z)
+    return labels.astype(np.int64)
+
+
+def embedding_cluster_subset(
+    graph_embeddings: np.ndarray,
+    subset: np.ndarray,
+    k: int,
+    seed: int,
+) -> np.ndarray:
+    """Cluster one recursive parent using precomputed graph embeddings."""
+    n = int(len(subset))
+    if n == 0:
+        return np.empty((0,), dtype=np.int64)
+    if k <= 1:
+        return np.zeros((n,), dtype=np.int64)
+    if n <= k:
+        return np.arange(n, dtype=np.int64)
+
+    features = graph_embeddings[subset]
+    labels = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(features)
     return labels.astype(np.int64)
 
 
@@ -744,6 +728,7 @@ def recursive_hierarchy(
     n = x.size(0)
     A = edge_index_to_sparse_adj(edge_index, edge_weight, n)
     A_semantic = None
+    graph_embeddings = None
     if method == "recursive_spectral":
         if not 0.0 <= args.spectral_semantic_weight <= 1.0:
             raise ValueError("--spectral_semantic_weight must be between 0 and 1")
@@ -754,6 +739,20 @@ def recursive_hierarchy(
                 f"nodes={n}, edges={A_semantic.nnz}, k={args.spectral_semantic_knn}, "
                 f"fusion_weight={args.spectral_semantic_weight}"
             )
+    elif method == "recursive_kmeans":
+        graph_embeddings = build_graph_embeddings(
+            method=args.graph_embedding_method,
+            adjacency=A,
+            node_features=x,
+            embedding_dim=args.fastrp_dim,
+            iteration_weights=args.fastrp_iteration_weights,
+            feature_weight=args.fastrp_feature_weight,
+            seed=args.fastrp_seed,
+        )
+        print(
+            f"Built {args.graph_embedding_method} graph embeddings: "
+            f"shape={graph_embeddings.shape}, feature_weight={args.fastrp_feature_weight}"
+        )
 
     parent_labels = np.zeros(n, dtype=np.int64)
     hierarchy: List[np.ndarray] = []
@@ -775,6 +774,14 @@ def recursive_hierarchy(
                     A=A,
                     A_semantic=A_semantic,
                     semantic_weight=args.spectral_semantic_weight,
+                    subset=subset,
+                    k=k,
+                    seed=rng_seed + level * 1009 + int(parent),
+                )
+                local_history = []
+            elif method == "recursive_kmeans":
+                local = embedding_cluster_subset(
+                    graph_embeddings=graph_embeddings,
                     subset=subset,
                     k=k,
                     seed=rng_seed + level * 1009 + int(parent),
@@ -1122,7 +1129,13 @@ def parse_args() -> argparse.Namespace:
         "--method",
         type=str,
         default="stacked_dmon",
-        choices=["stacked_dmon", "recursive_spectral", "recursive_leiden", "recursive_dmon"],
+        choices=[
+            "stacked_dmon",
+            "recursive_spectral",
+            "recursive_kmeans",
+            "recursive_leiden",
+            "recursive_dmon",
+        ],
     )
 
     src = parser.add_mutually_exclusive_group(required=True)
@@ -1162,6 +1175,22 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="For recursive_spectral, number of cosine-similarity neighbors per item.",
     )
+    parser.add_argument(
+        "--graph_embedding_method",
+        choices=["fastrp"],
+        default="fastrp",
+        help="Graph-to-feature preprocessing used by recursive_kmeans.",
+    )
+    parser.add_argument("--fastrp_dim", type=int, default=256)
+    parser.add_argument("--fastrp_feature_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--fastrp_iteration_weights",
+        type=float,
+        nargs="+",
+        default=[0.0, 1.0, 1.0],
+        help="FastRP hop weights, including the initial projection at index zero.",
+    )
+    parser.add_argument("--fastrp_seed", type=int, default=42)
     parser.add_argument(
         "--leiden_resolution_min",
         type=float,
