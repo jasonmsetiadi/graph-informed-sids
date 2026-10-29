@@ -255,8 +255,6 @@ class Yelp(AbstractDataset):
         reviews = self._load_reviews(input_path)
         reviews = self._apply_kcore(reviews)
         reviews = self._sample_users(reviews)
-        if self.user_sample_size is not None:
-            reviews = self._apply_kcore(reviews)
         seqs = self._get_item_seqs(reviews)
         all_seqs, id_mapping = self._remap_ids(seqs)
 
