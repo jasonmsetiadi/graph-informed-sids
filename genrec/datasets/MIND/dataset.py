@@ -1,5 +1,6 @@
 import os
 import json
+from collections import Counter
 import pandas as pd
 from tqdm import tqdm
 from typing import Optional
@@ -57,6 +58,8 @@ class MIND(AbstractDataset):
             - cache_dir (str): Root cache directory.
             - metadata (str): One of 'none', 'raw', 'sentence'.
             - kcore (int, optional): K-core threshold. Default: 5.
+            - max_users (int, optional): Keep this many most-active users after
+              k-core filtering. Ties are broken by raw user ID.
 
     Attributes:
         cache_dir (str): Directory path for caching the dataset.
@@ -69,7 +72,11 @@ class MIND(AbstractDataset):
         super(MIND, self).__init__(config)
 
         self.kcore = config.get('kcore', 5)
-        self.log(f'[DATASET] MIND Dataset (k-core={self.kcore})')
+        self.max_users = config.get('max_users')
+        self.log(
+            f'[DATASET] MIND Dataset (k-core={self.kcore}, '
+            f'max users={self.max_users})'
+        )
 
         self.cache_dir = os.path.join(config['cache_dir'], 'MIND')
         self._check_raw_files()
@@ -133,6 +140,25 @@ class MIND(AbstractDataset):
             f'{df[I_COL].nunique()} items, {len(df)} interactions'
         )
         return list(df.itertuples(index=False, name=None))
+
+    def _keep_most_active_users(self, reviews: list) -> list:
+        """Keep users with the longest histories, deterministically."""
+        if self.max_users is None:
+            return reviews
+        if self.max_users < 1:
+            raise ValueError('max_users must be at least 1 or None')
+
+        user_counts = Counter(review[0] for review in reviews)
+        if len(user_counts) <= self.max_users:
+            return reviews
+        selected = set(
+            sorted(user_counts, key=lambda user: (-user_counts[user], user))[:self.max_users]
+        )
+        self.log(
+            f'[DATASET] Keeping {len(selected):,} most-active users '
+            f'from {len(user_counts):,} users after k-core filtering'
+        )
+        return [review for review in reviews if review[0] in selected]
 
     def _get_item_seqs(self, reviews: list) -> dict:
         """
@@ -213,6 +239,7 @@ class MIND(AbstractDataset):
         self.log('[DATASET] Processing interactions...')
         reviews = self._load_reviews(input_path)
         reviews = self._apply_kcore(reviews)
+        reviews = self._keep_most_active_users(reviews)
         seqs = self._get_item_seqs(reviews)
         all_seqs, id_mapping = self._remap_ids(seqs)
 

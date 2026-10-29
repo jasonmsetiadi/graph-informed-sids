@@ -1,5 +1,6 @@
 import os
 import json
+import random
 import pandas as pd
 from tqdm import tqdm
 from typing import Optional
@@ -57,6 +58,9 @@ class Yelp(AbstractDataset):
             - cache_dir (str): Root cache directory.
             - metadata (str): One of 'none', 'raw', 'sentence'.
             - kcore (int, optional): K-core threshold for iterative filtering. Default: 5.
+            - user_sample_size (int, optional): Number of users to sample after full-data
+              k-core filtering. If omitted or None, keep all users.
+            - user_sample_seed (int, optional): Seed used for deterministic user sampling.
 
     Attributes:
         cache_dir (str): Directory path for caching the dataset.
@@ -72,7 +76,14 @@ class Yelp(AbstractDataset):
         super(Yelp, self).__init__(config)
 
         self.kcore = config.get('kcore', 5)
+        self.user_sample_size = config.get('user_sample_size')
+        self.user_sample_seed = config.get('user_sample_seed', 42)
         self.log(f'[DATASET] Yelp Academic Dataset (k-core={self.kcore})')
+        if self.user_sample_size is not None:
+            self.log(
+                f'[DATASET] Sampling {self.user_sample_size} users '
+                f'(seed={self.user_sample_seed}) after full-data k-core'
+            )
 
         self.cache_dir = os.path.join(config['cache_dir'], 'Yelp')
         self._check_raw_files()
@@ -144,6 +155,24 @@ class Yelp(AbstractDataset):
             f'{df[I_COL].nunique()} items, {len(df)} interactions'
         )
         return list(df.itertuples(index=False, name=None))
+
+    def _sample_users(self, reviews: list) -> list:
+        """Sample users deterministically from the full-data k-core graph."""
+        if self.user_sample_size is None:
+            return reviews
+        if self.user_sample_size < 1:
+            raise ValueError('user_sample_size must be at least 1 or None')
+
+        users = sorted({review[0] for review in reviews})
+        sample_size = min(self.user_sample_size, len(users))
+        sampled_users = set(
+            random.Random(self.user_sample_seed).sample(users, sample_size)
+        )
+        self.log(
+            f'[DATASET] Selected {len(sampled_users):,} of {len(users):,} '
+            'users before reapplying k-core filtering'
+        )
+        return [review for review in reviews if review[0] in sampled_users]
 
     def _get_item_seqs(self, reviews: list) -> dict:
         """
@@ -225,6 +254,9 @@ class Yelp(AbstractDataset):
         self.log('[DATASET] Processing reviews...')
         reviews = self._load_reviews(input_path)
         reviews = self._apply_kcore(reviews)
+        reviews = self._sample_users(reviews)
+        if self.user_sample_size is not None:
+            reviews = self._apply_kcore(reviews)
         seqs = self._get_item_seqs(reviews)
         all_seqs, id_mapping = self._remap_ids(seqs)
 
