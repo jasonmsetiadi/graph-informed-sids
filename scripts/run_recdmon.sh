@@ -2,13 +2,39 @@
 set -euo pipefail
 
 
-CLUSTERING_METHOD="${1:-${CLUSTERING_METHOD:-recursive_dmon}}"
+if [[ "${RECKMEANS_CONFIGURED:-0}" == "1" ]]; then
+  CLUSTERING_METHOD="recursive_kmeans"
+elif [[ "${RECSPECTRAL_CONFIGURED:-0}" == "1" ]]; then
+  CLUSTERING_METHOD="recursive_spectral"
+elif [[ "${RECLEIDEN_CONFIGURED:-0}" == "1" ]]; then
+  CLUSTERING_METHOD="recursive_leiden"
+else
+  CLUSTERING_METHOD="${1:-${CLUSTERING_METHOD:-recursive_dmon}}"
+fi
 
 case "${CLUSTERING_METHOD}" in
-  stacked_dmon|recursive_spectral|recursive_kmeans|recursive_leiden|recursive_dmon) ;;
+  stacked_dmon|recursive_dmon) ;;
+  recursive_leiden)
+    if [[ "${RECLEIDEN_CONFIGURED:-0}" != "1" ]]; then
+      echo "Use scripts/run_recleiden.sh for recursive Leiden clustering." >&2
+      exit 2
+    fi
+    ;;
+  recursive_spectral)
+    if [[ "${RECSPECTRAL_CONFIGURED:-0}" != "1" ]]; then
+      echo "Use scripts/run_recspectral.sh for recursive spectral clustering." >&2
+      exit 2
+    fi
+    ;;
+  recursive_kmeans)
+    if [[ "${RECKMEANS_CONFIGURED:-0}" != "1" ]]; then
+      echo "Use scripts/run_reckmeans.sh for recursive K-means." >&2
+      exit 2
+    fi
+    ;;
   *)
     echo "Unsupported clustering method: ${CLUSTERING_METHOD}" >&2
-    echo "Choose stacked_dmon, recursive_spectral, recursive_kmeans, recursive_leiden, or recursive_dmon." >&2
+    echo "Choose stacked_dmon or recursive_dmon." >&2
     exit 2
     ;;
 esac
@@ -37,25 +63,12 @@ run_step () {
 DATASET="${DATASET}"
 # METHOD_NAME="RecDMoN_qwen"
 # EMB_MODEL="Qwen3-Embedding-0.6B"
-METHOD_NAME="RecDMoN_t5"
+METHOD_NAME="${METHOD_NAME:-RecDMoN_t5}"
 EMB_MODEL="sentence-t5-base"
 SEEDS=(42 43 44)
 
 CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
-SPECTRAL_SEMANTIC_WEIGHT=0.5
-SPECTRAL_SEMANTIC_KNN=20
-GRAPH_EMBEDDING_METHOD=fastrp
-FASTRP_DIM=256
-FASTRP_FEATURE_WEIGHT=1.0
-FASTRP_ITERATION_WEIGHTS=(0.0 1.0 1.0)
-FASTRP_SEED=42
-LEIDEN_RESOLUTION_MIN=0.01
-LEIDEN_RESOLUTION_MAX=100.0
-LEIDEN_RESOLUTION_POINTS=41
-LEIDEN_PLATEAU_TOLERANCE=0.05
-LEIDEN_EARLY_STOP_PATIENCE=10
-LEIDEN_ITERATIONS=-1
 RECURSIVE_FACTOR=6
 RECURSIVE_LEVELS=4
 
@@ -106,9 +119,19 @@ for SEED in "${SEEDS[@]}"; do
   # Alias identifies every artifact from this run.
   CLUSTERING_LABEL="${CLUSTERING_METHOD}"
   if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
-    CLUSTERING_LABEL="${CLUSTERING_METHOD}_${GRAPH_EMBEDDING_METHOD}"
+    CLUSTERING_LABEL="${GRAPH_EMBEDDING_METHOD}"
+  elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
+    CLUSTERING_LABEL="${SPECTRAL_EMBEDDING_METHOD}_alpha${SPECTRAL_FUSION_ALPHA}_k${SPECTRAL_KNN}"
+  elif [[ "${CLUSTERING_METHOD}" == "recursive_leiden" ]]; then
+    CLUSTERING_LABEL="${LEIDEN_EMBEDDING_METHOD}_alpha${LEIDEN_FUSION_ALPHA}_k${LEIDEN_KNN}"
+  elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
+    CLUSTERING_LABEL=""
   fi
-  ALIAS="${METHOD_NAME}_${CLUSTERING_LABEL}_${DATASET}_seed${SEED}"
+  if [[ -n "${CLUSTERING_LABEL}" ]]; then
+    ALIAS="${METHOD_NAME}_${CLUSTERING_LABEL}_${DATASET}_seed${SEED}"
+  else
+    ALIAS="${METHOD_NAME}_${DATASET}_seed${SEED}"
+  fi
   INDEX_FILE=".${ALIAS}.index.json"
 
   OUT_DIR="${GENSID_CACHE_DIR}/mincut_runs/${ALIAS}"
@@ -134,31 +157,11 @@ for SEED in "${SEEDS[@]}"; do
   if [[ "${CLUSTERING_METHOD}" == "stacked_dmon" ]]; then
     CLUSTERING_ARGS+=(--cluster_sizes "${CLUSTER_SIZES[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
-    CLUSTERING_ARGS+=(
-      --recursive_factor "${RECURSIVE_FACTOR}"
-      --recursive_levels "${RECURSIVE_LEVELS}"
-      --spectral_semantic_weight "${SPECTRAL_SEMANTIC_WEIGHT}"
-      --spectral_semantic_knn "${SPECTRAL_SEMANTIC_KNN}"
-    )
+    CLUSTERING_ARGS+=("${RECSPECTRAL_CLUSTERING_ARGS[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
-    CLUSTERING_ARGS+=(
-      --recursive_factor "${RECURSIVE_FACTOR}"
-      --recursive_levels "${RECURSIVE_LEVELS}"
-      --graph_embedding_method "${GRAPH_EMBEDDING_METHOD}"
-      --fastrp_dim "${FASTRP_DIM}"
-      --fastrp_feature_weight "${FASTRP_FEATURE_WEIGHT}"
-      --fastrp_iteration_weights "${FASTRP_ITERATION_WEIGHTS[@]}"
-      --fastrp_seed "${FASTRP_SEED}"
-    )
+    CLUSTERING_ARGS+=("${RECKMEANS_CLUSTERING_ARGS[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_leiden" ]]; then
-    CLUSTERING_ARGS+=(
-      --leiden_resolution_min "${LEIDEN_RESOLUTION_MIN}"
-      --leiden_resolution_max "${LEIDEN_RESOLUTION_MAX}"
-      --leiden_resolution_points "${LEIDEN_RESOLUTION_POINTS}"
-      --leiden_plateau_tolerance "${LEIDEN_PLATEAU_TOLERANCE}"
-      --leiden_early_stop_patience "${LEIDEN_EARLY_STOP_PATIENCE}"
-      --leiden_iterations "${LEIDEN_ITERATIONS}"
-    )
+    CLUSTERING_ARGS+=("${RECLEIDEN_CLUSTERING_ARGS[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_ARGS+=(
       --recursive_factor "${RECURSIVE_FACTOR}"

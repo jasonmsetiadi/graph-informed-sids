@@ -8,12 +8,23 @@ import torch
 from sklearn.neighbors import NearestNeighbors
 
 
-def build_semantic_knn_adj(x: torch.Tensor, knn: int) -> sp.csr_matrix:
-    """Build a symmetric cosine-similarity kNN graph from item embeddings."""
+def build_embedding_knn_adj(
+    embeddings: torch.Tensor | np.ndarray,
+    knn: int,
+) -> sp.csr_matrix:
+    """Build a symmetric cosine-similarity kNN graph from node embeddings."""
     if knn < 1:
         raise ValueError("knn must be >= 1")
 
-    x_np = x.detach().cpu().numpy().astype(np.float32, copy=False)
+    if isinstance(embeddings, torch.Tensor):
+        x_np = embeddings.detach().cpu().numpy()
+    else:
+        x_np = np.asarray(embeddings)
+    if x_np.ndim != 2:
+        raise ValueError(f"embeddings must be 2D, got shape {x_np.shape}")
+    if not np.all(np.isfinite(x_np)):
+        raise ValueError("embeddings contain non-finite values")
+    x_np = x_np.astype(np.float32, copy=False)
     num_nodes = x_np.shape[0]
     if num_nodes <= 1:
         return sp.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
@@ -33,14 +44,14 @@ def build_semantic_knn_adj(x: torch.Tensor, knn: int) -> sp.csr_matrix:
     similarities = (1.0 - distances.reshape(-1)).astype(np.float64, copy=False)
     keep = keep_matrix.reshape(-1) & np.isfinite(similarities) & (similarities > 0.0)
 
-    semantic_adj = sp.coo_matrix(
+    embedding_adj = sp.coo_matrix(
         (similarities[keep], (rows[keep], cols[keep])),
         shape=(num_nodes, num_nodes),
     ).tocsr()
-    semantic_adj = semantic_adj.maximum(semantic_adj.T)
-    semantic_adj.setdiag(0.0)
-    semantic_adj.eliminate_zeros()
-    return semantic_adj
+    embedding_adj = embedding_adj.maximum(embedding_adj.T)
+    embedding_adj.setdiag(0.0)
+    embedding_adj.eliminate_zeros()
+    return embedding_adj
 
 
 def normalize_affinity_for_fusion(adjacency: sp.csr_matrix) -> sp.csr_matrix:
@@ -51,26 +62,26 @@ def normalize_affinity_for_fusion(adjacency: sp.csr_matrix) -> sp.csr_matrix:
 
 def fuse_adjacencies(
     interaction_adj: sp.csr_matrix,
-    semantic_adj: sp.csr_matrix,
-    semantic_weight: float,
+    embedding_adj: sp.csr_matrix,
+    fusion_alpha: float,
 ) -> sp.csr_matrix:
-    """Fuse interaction and semantic affinities using a weight in [0, 1]."""
-    if not 0.0 <= semantic_weight <= 1.0:
-        raise ValueError("semantic_weight must be between 0 and 1")
-    if interaction_adj.shape != semantic_adj.shape:
+    """Fuse interaction and embedding affinities using alpha in [0, 1]."""
+    if not 0.0 <= fusion_alpha <= 1.0:
+        raise ValueError("fusion_alpha must be between 0 and 1")
+    if interaction_adj.shape != embedding_adj.shape:
         raise ValueError(
-            "Interaction and semantic adjacency shapes must match, got "
-            f"{interaction_adj.shape} and {semantic_adj.shape}"
+            "Interaction and embedding adjacency shapes must match, got "
+            f"{interaction_adj.shape} and {embedding_adj.shape}"
         )
 
-    if semantic_weight <= 0.0:
+    if fusion_alpha <= 0.0:
         return interaction_adj
-    if semantic_weight >= 1.0:
-        return semantic_adj
+    if fusion_alpha >= 1.0:
+        return embedding_adj
 
     fused = (
-        (1.0 - semantic_weight) * normalize_affinity_for_fusion(interaction_adj)
-        + semantic_weight * normalize_affinity_for_fusion(semantic_adj)
+        (1.0 - fusion_alpha) * normalize_affinity_for_fusion(interaction_adj)
+        + fusion_alpha * normalize_affinity_for_fusion(embedding_adj)
     ).tocsr()
     fused.eliminate_zeros()
     return fused

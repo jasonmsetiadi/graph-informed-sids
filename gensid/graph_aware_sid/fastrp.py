@@ -1,4 +1,4 @@
-"""Graph-to-feature preprocessing for graph-aware clustering."""
+"""Feature-aware FastRP graph embedding preprocessing."""
 
 from __future__ import annotations
 
@@ -63,8 +63,6 @@ def build_fastrp_embeddings(
         dim=int(embedding_dim),
         weights=weights,
         seed=int(seed),
-        # InteractionGraphBuilder output is already made undirected, and
-        # edge_index_to_sparse_adj symmetrizes it before this function.
         undirected=False,
         node_features=features,
         feature_weight=float(feature_weight),
@@ -76,19 +74,3 @@ def build_fastrp_embeddings(
     if not np.all(np.isfinite(embeddings)):
         raise ValueError("FastRP returned non-finite embeddings")
     return embeddings
-
-
-def build_graph_embeddings(
-    method: str,
-    adjacency: sp.csr_matrix,
-    node_features: torch.Tensor | np.ndarray,
-    **kwargs,
-) -> np.ndarray:
-    """Dispatch a graph embedding method through one shared interface."""
-    if method == "fastrp":
-        return build_fastrp_embeddings(
-            adjacency=adjacency,
-            node_features=node_features,
-            **kwargs,
-        )
-    raise ValueError(f"Unknown graph embedding method: {method!r}")

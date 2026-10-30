@@ -46,6 +46,13 @@ bash scripts/run_s2gr.sh
 bash scripts/run_mmgrec.sh
 bash scripts/run_gae_components_ablation.sh          # TIGER, RQ-GAE, RQ-GAE w/o graph-loss, RQ-GAE w/o graph-input
 bash scripts/run_recdmon.sh
+bash scripts/run_reckmeans.sh fastrp                 # Recursive K-means over FastRP embeddings
+bash scripts/run_recspectral.sh semantic             # Recursive spectral with semantic-embedding kNN fusion
+bash scripts/run_recspectral.sh fastrp               # Recursive spectral with FastRP-embedding kNN fusion
+bash scripts/run_recspectral.sh s3gc                 # Recursive spectral with S3GC-embedding kNN fusion
+bash scripts/run_recleiden.sh semantic               # Recursive Leiden with semantic-embedding kNN fusion
+bash scripts/run_recleiden.sh fastrp                 # Recursive Leiden with FastRP-embedding kNN fusion
+bash scripts/run_recleiden.sh s3gc                   # Recursive Leiden with S3GC-embedding kNN fusion
 ```
 
 The `scripts/` directory contains all experiments needed to reproduce the results in the paper. Results are saved under `results/`, named by the alias specified in each script.
