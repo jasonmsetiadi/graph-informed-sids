@@ -53,7 +53,18 @@ bash scripts/run_recspectral.sh s3gc                 # Recursive spectral with S
 bash scripts/run_recleiden.sh semantic               # Recursive Leiden with semantic-embedding kNN fusion
 bash scripts/run_recleiden.sh fastrp                 # Recursive Leiden with FastRP-embedding kNN fusion
 bash scripts/run_recleiden.sh s3gc                   # Recursive Leiden with S3GC-embedding kNN fusion
+bash scripts/run_reckmeans.sh magi                   # MAGI and NS4GC are also available to all three runners
+bash scripts/run_recspectral.sh ns4gc                # Local weighted NS4GC, sampled mode by default
+NS4GC_TRAINING_MODE=full bash scripts/run_reckmeans.sh ns4gc  # Exact small-graph NS4GC
 ```
+
+Graph-aware embedding choices are `fastrp`, `s3gc`, `magi`, and `ns4gc`.
+Recursive spectral and Leiden additionally accept `semantic` for the original item embeddings.
+The `ns4gc` backend is a local weighted variant rather than the standard unweighted
+PyAGC objective. It uses raw interaction edge weights in GCN propagation and the
+neighbor-consistency loss, falling back to unit weights only when weights are absent.
+Use `NS4GC_TRAINING_MODE=sampled` for scalable training or `full` for exact
+full-graph training up to `NS4GC_MAX_FULL_NODES` (default `10000`).
 
 The `scripts/` directory contains all experiments needed to reproduce the results in the paper. Results are saved under `results/`, named by the alias specified in each script.
 

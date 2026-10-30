@@ -120,10 +120,19 @@ for SEED in "${SEEDS[@]}"; do
   CLUSTERING_LABEL="${CLUSTERING_METHOD}"
   if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
     CLUSTERING_LABEL="${GRAPH_EMBEDDING_METHOD}"
+    if [[ "${GRAPH_EMBEDDING_METHOD}" == "ns4gc" ]]; then
+      CLUSTERING_LABEL="${CLUSTERING_LABEL}_${NS4GC_TRAINING_MODE}"
+    fi
   elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
     CLUSTERING_LABEL="${SPECTRAL_EMBEDDING_METHOD}_alpha${SPECTRAL_FUSION_ALPHA}_k${SPECTRAL_KNN}"
+    if [[ "${SPECTRAL_EMBEDDING_METHOD}" == "ns4gc" ]]; then
+      CLUSTERING_LABEL="ns4gc_${NS4GC_TRAINING_MODE}_alpha${SPECTRAL_FUSION_ALPHA}_k${SPECTRAL_KNN}"
+    fi
   elif [[ "${CLUSTERING_METHOD}" == "recursive_leiden" ]]; then
     CLUSTERING_LABEL="${LEIDEN_EMBEDDING_METHOD}_alpha${LEIDEN_FUSION_ALPHA}_k${LEIDEN_KNN}"
+    if [[ "${LEIDEN_EMBEDDING_METHOD}" == "ns4gc" ]]; then
+      CLUSTERING_LABEL="ns4gc_${NS4GC_TRAINING_MODE}_alpha${LEIDEN_FUSION_ALPHA}_k${LEIDEN_KNN}"
+    fi
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_LABEL=""
   fi

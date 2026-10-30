@@ -62,6 +62,8 @@ from torch_geometric.nn import GCNConv
 from graph_aware_sid.adjacency_fusion import build_embedding_knn_adj, fuse_adjacencies
 from graph_aware_sid.fastrp import build_fastrp_embeddings
 from graph_aware_sid.graph_utils import InteractionGraphBuilder, load_train_item_mask
+from graph_aware_sid.magi import build_magi_embeddings
+from graph_aware_sid.ns4gc import build_ns4gc_embeddings
 from graph_aware_sid.s3gc import build_s3gc_embeddings
 
 
@@ -197,6 +199,77 @@ def relabel_compact(labels: np.ndarray) -> np.ndarray:
     return out
 
 
+def graph_embedding_metadata(method: str, args: argparse.Namespace) -> Dict[str, Any]:
+    """Return method-specific graph embedding configuration for run metadata."""
+    if method == "fastrp":
+        return {
+            "fastrp_dim": int(args.fastrp_dim),
+            "fastrp_feature_weight": float(args.fastrp_feature_weight),
+            "fastrp_iteration_weights": [float(x) for x in args.fastrp_iteration_weights],
+            "fastrp_seed": int(args.fastrp_seed),
+        }
+    if method == "s3gc":
+        return {
+            "s3gc_dim": int(args.s3gc_dim),
+            "s3gc_epochs": int(args.s3gc_epochs),
+            "s3gc_batch_size": int(args.s3gc_batch_size),
+            "s3gc_lr": float(args.s3gc_lr),
+            "s3gc_weight_decay": float(args.s3gc_weight_decay),
+            "s3gc_walk_length": int(args.s3gc_walk_length),
+            "s3gc_context_size": int(args.s3gc_context_size),
+            "s3gc_walks_per_node": int(args.s3gc_walks_per_node),
+            "s3gc_num_negative_samples": int(args.s3gc_num_negative_samples),
+            "s3gc_diffusion_hops": int(args.s3gc_diffusion_hops),
+            "s3gc_ppr_alpha": float(args.s3gc_ppr_alpha),
+            "s3gc_scale": args.s3gc_scale,
+            "s3gc_seed": int(args.s3gc_seed),
+            "s3gc_uses_edge_weights": False,
+        }
+    if method == "magi":
+        return {
+            "magi_dim": int(args.magi_dim),
+            "magi_num_layers": int(args.magi_num_layers),
+            "magi_epochs": int(args.magi_epochs),
+            "magi_batch_size": int(args.magi_batch_size),
+            "magi_lr": float(args.magi_lr),
+            "magi_weight_decay": float(args.magi_weight_decay),
+            "magi_num_neighbors": int(args.magi_num_neighbors),
+            "magi_num_walks": int(args.magi_num_walks),
+            "magi_walk_length": int(args.magi_walk_length),
+            "magi_inference_batch_size": int(args.magi_inference_batch_size),
+            "magi_inference_neighbors": int(args.magi_inference_neighbors),
+            "magi_temperature": float(args.magi_temperature),
+            "magi_seed": int(args.magi_seed),
+            "magi_uses_edge_weights": False,
+        }
+    if method == "ns4gc":
+        return {
+            "ns4gc_variant": "weighted_local",
+            "ns4gc_dim": int(args.ns4gc_dim),
+            "ns4gc_num_layers": int(args.ns4gc_num_layers),
+            "ns4gc_epochs": int(args.ns4gc_epochs),
+            "ns4gc_batch_size": int(args.ns4gc_batch_size),
+            "ns4gc_lr": float(args.ns4gc_lr),
+            "ns4gc_weight_decay": float(args.ns4gc_weight_decay),
+            "ns4gc_num_neighbors": int(args.ns4gc_num_neighbors),
+            "ns4gc_inference_batch_size": int(args.ns4gc_inference_batch_size),
+            "ns4gc_inference_neighbors": int(args.ns4gc_inference_neighbors),
+            "ns4gc_feature_mask": float(args.ns4gc_feature_mask),
+            "ns4gc_edge_drop": float(args.ns4gc_edge_drop),
+            "ns4gc_similarity_threshold": float(args.ns4gc_similarity_threshold),
+            "ns4gc_temperature": float(args.ns4gc_temperature),
+            "ns4gc_neighbor_weight": float(args.ns4gc_neighbor_weight),
+            "ns4gc_sparsity_weight": float(args.ns4gc_sparsity_weight),
+            "ns4gc_training_mode": args.ns4gc_training_mode,
+            "ns4gc_max_full_nodes": int(args.ns4gc_max_full_nodes),
+            "ns4gc_seed": int(args.ns4gc_seed),
+            "ns4gc_uses_edge_weights": True,
+            "ns4gc_edge_weight_transform": "raw",
+            "ns4gc_unit_weight_fallback": bool(not args.input_has_edge_weight),
+        }
+    raise ValueError(f"Unknown graph embedding method: {method!r}")
+
+
 def save_outputs(
     args: argparse.Namespace,
     graph_labels_coarse_to_fine: Sequence[np.ndarray],
@@ -277,64 +350,11 @@ def save_outputs(
                     "spectral_knn": int(args.spectral_knn),
                 }
             )
-            if args.spectral_embedding_method == "fastrp":
-                metadata.update(
-                    {
-                        "fastrp_dim": int(args.fastrp_dim),
-                        "fastrp_feature_weight": float(args.fastrp_feature_weight),
-                        "fastrp_iteration_weights": [float(x) for x in args.fastrp_iteration_weights],
-                        "fastrp_seed": int(args.fastrp_seed),
-                    }
-                )
-            elif args.spectral_embedding_method == "s3gc":
-                metadata.update(
-                    {
-                        "s3gc_dim": int(args.s3gc_dim),
-                        "s3gc_epochs": int(args.s3gc_epochs),
-                        "s3gc_batch_size": int(args.s3gc_batch_size),
-                        "s3gc_lr": float(args.s3gc_lr),
-                        "s3gc_weight_decay": float(args.s3gc_weight_decay),
-                        "s3gc_walk_length": int(args.s3gc_walk_length),
-                        "s3gc_context_size": int(args.s3gc_context_size),
-                        "s3gc_walks_per_node": int(args.s3gc_walks_per_node),
-                        "s3gc_num_negative_samples": int(args.s3gc_num_negative_samples),
-                        "s3gc_diffusion_hops": int(args.s3gc_diffusion_hops),
-                        "s3gc_ppr_alpha": float(args.s3gc_ppr_alpha),
-                        "s3gc_scale": args.s3gc_scale,
-                        "s3gc_seed": int(args.s3gc_seed),
-                        "s3gc_uses_edge_weights": False,
-                    }
-                )
+            if args.spectral_embedding_method != "semantic":
+                metadata.update(graph_embedding_metadata(args.spectral_embedding_method, args))
         elif args.method == "recursive_kmeans":
             metadata["graph_embedding_method"] = args.graph_embedding_method
-            if args.graph_embedding_method == "fastrp":
-                metadata.update(
-                    {
-                        "fastrp_dim": int(args.fastrp_dim),
-                        "fastrp_feature_weight": float(args.fastrp_feature_weight),
-                        "fastrp_iteration_weights": [float(x) for x in args.fastrp_iteration_weights],
-                        "fastrp_seed": int(args.fastrp_seed),
-                    }
-                )
-            elif args.graph_embedding_method == "s3gc":
-                metadata.update(
-                    {
-                        "s3gc_dim": int(args.s3gc_dim),
-                        "s3gc_epochs": int(args.s3gc_epochs),
-                        "s3gc_batch_size": int(args.s3gc_batch_size),
-                        "s3gc_lr": float(args.s3gc_lr),
-                        "s3gc_weight_decay": float(args.s3gc_weight_decay),
-                        "s3gc_walk_length": int(args.s3gc_walk_length),
-                        "s3gc_context_size": int(args.s3gc_context_size),
-                        "s3gc_walks_per_node": int(args.s3gc_walks_per_node),
-                        "s3gc_num_negative_samples": int(args.s3gc_num_negative_samples),
-                        "s3gc_diffusion_hops": int(args.s3gc_diffusion_hops),
-                        "s3gc_ppr_alpha": float(args.s3gc_ppr_alpha),
-                        "s3gc_scale": args.s3gc_scale,
-                        "s3gc_seed": int(args.s3gc_seed),
-                        "s3gc_uses_edge_weights": False,
-                    }
-                )
+            metadata.update(graph_embedding_metadata(args.graph_embedding_method, args))
         elif args.method == "recursive_leiden":
             metadata.update(
                 {
@@ -350,34 +370,8 @@ def save_outputs(
                     "leiden_selection": "widest_stable_nontrivial_plateau_else_natural_stop",
                 }
             )
-            if args.leiden_embedding_method == "fastrp":
-                metadata.update(
-                    {
-                        "fastrp_dim": int(args.fastrp_dim),
-                        "fastrp_feature_weight": float(args.fastrp_feature_weight),
-                        "fastrp_iteration_weights": [float(x) for x in args.fastrp_iteration_weights],
-                        "fastrp_seed": int(args.fastrp_seed),
-                    }
-                )
-            elif args.leiden_embedding_method == "s3gc":
-                metadata.update(
-                    {
-                        "s3gc_dim": int(args.s3gc_dim),
-                        "s3gc_epochs": int(args.s3gc_epochs),
-                        "s3gc_batch_size": int(args.s3gc_batch_size),
-                        "s3gc_lr": float(args.s3gc_lr),
-                        "s3gc_weight_decay": float(args.s3gc_weight_decay),
-                        "s3gc_walk_length": int(args.s3gc_walk_length),
-                        "s3gc_context_size": int(args.s3gc_context_size),
-                        "s3gc_walks_per_node": int(args.s3gc_walks_per_node),
-                        "s3gc_num_negative_samples": int(args.s3gc_num_negative_samples),
-                        "s3gc_diffusion_hops": int(args.s3gc_diffusion_hops),
-                        "s3gc_ppr_alpha": float(args.s3gc_ppr_alpha),
-                        "s3gc_scale": args.s3gc_scale,
-                        "s3gc_seed": int(args.s3gc_seed),
-                        "s3gc_uses_edge_weights": False,
-                    }
-                )
+            if args.leiden_embedding_method != "semantic":
+                metadata.update(graph_embedding_metadata(args.leiden_embedding_method, args))
     else:
         metadata.update(
             {
@@ -416,6 +410,94 @@ def save_outputs(
     print("\nFor RVQ prefix alignment, consume labels_json['coarse_to_fine_item_labels'].")
     print("  level_1 -> coarsest supervision for prefix-1")
     print("  level_2 -> finer supervision for prefix-2, etc.")
+
+
+def build_selected_graph_embeddings(
+    method: str,
+    A: sp.csr_matrix,
+    x: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_weight: torch.Tensor | None,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> np.ndarray:
+    """Run one graph-aware embedding backend through its method-specific module."""
+    if method == "fastrp":
+        return build_fastrp_embeddings(
+            adjacency=A,
+            node_features=x,
+            embedding_dim=args.fastrp_dim,
+            iteration_weights=args.fastrp_iteration_weights,
+            feature_weight=args.fastrp_feature_weight,
+            seed=args.fastrp_seed,
+        )
+    if method == "s3gc":
+        return build_s3gc_embeddings(
+            edge_index=edge_index,
+            node_features=x,
+            embedding_dim=args.s3gc_dim,
+            epochs=args.s3gc_epochs,
+            batch_size=args.s3gc_batch_size,
+            learning_rate=args.s3gc_lr,
+            weight_decay=args.s3gc_weight_decay,
+            walk_length=args.s3gc_walk_length,
+            context_size=args.s3gc_context_size,
+            walks_per_node=args.s3gc_walks_per_node,
+            num_negative_samples=args.s3gc_num_negative_samples,
+            diffusion_hops=args.s3gc_diffusion_hops,
+            ppr_alpha=args.s3gc_ppr_alpha,
+            scale=args.s3gc_scale,
+            seed=args.s3gc_seed,
+            device=device,
+            print_every=args.s3gc_print_every,
+        )
+    if method == "magi":
+        return build_magi_embeddings(
+            edge_index=edge_index,
+            node_features=x,
+            embedding_dim=args.magi_dim,
+            num_layers=args.magi_num_layers,
+            epochs=args.magi_epochs,
+            batch_size=args.magi_batch_size,
+            learning_rate=args.magi_lr,
+            weight_decay=args.magi_weight_decay,
+            num_neighbors=args.magi_num_neighbors,
+            num_walks=args.magi_num_walks,
+            walk_length=args.magi_walk_length,
+            inference_batch_size=args.magi_inference_batch_size,
+            inference_neighbors=args.magi_inference_neighbors,
+            temperature=args.magi_temperature,
+            seed=args.magi_seed,
+            device=device,
+            print_every=args.magi_print_every,
+        )
+    if method == "ns4gc":
+        return build_ns4gc_embeddings(
+            edge_index=edge_index,
+            edge_weight=edge_weight,
+            node_features=x,
+            embedding_dim=args.ns4gc_dim,
+            num_layers=args.ns4gc_num_layers,
+            epochs=args.ns4gc_epochs,
+            batch_size=args.ns4gc_batch_size,
+            learning_rate=args.ns4gc_lr,
+            weight_decay=args.ns4gc_weight_decay,
+            num_neighbors=args.ns4gc_num_neighbors,
+            inference_batch_size=args.ns4gc_inference_batch_size,
+            inference_neighbors=args.ns4gc_inference_neighbors,
+            feature_mask=args.ns4gc_feature_mask,
+            edge_drop=args.ns4gc_edge_drop,
+            similarity_threshold=args.ns4gc_similarity_threshold,
+            temperature=args.ns4gc_temperature,
+            neighbor_weight=args.ns4gc_neighbor_weight,
+            sparsity_weight=args.ns4gc_sparsity_weight,
+            training_mode=args.ns4gc_training_mode,
+            max_full_nodes=args.ns4gc_max_full_nodes,
+            seed=args.ns4gc_seed,
+            device=device,
+            print_every=args.ns4gc_print_every,
+        )
+    raise ValueError(f"Unknown graph embedding method: {method!r}")
 
 
 # -----------------------------------------------------------------------------
@@ -821,38 +903,15 @@ def recursive_hierarchy(
         if args.spectral_fusion_alpha > 0.0:
             if args.spectral_embedding_method == "semantic":
                 spectral_embeddings = x
-            elif args.spectral_embedding_method == "fastrp":
-                spectral_embeddings = build_fastrp_embeddings(
-                    adjacency=A,
-                    node_features=x,
-                    embedding_dim=args.fastrp_dim,
-                    iteration_weights=args.fastrp_iteration_weights,
-                    feature_weight=args.fastrp_feature_weight,
-                    seed=args.fastrp_seed,
-                )
-            elif args.spectral_embedding_method == "s3gc":
-                spectral_embeddings = build_s3gc_embeddings(
-                    edge_index=edge_index,
-                    node_features=x,
-                    embedding_dim=args.s3gc_dim,
-                    epochs=args.s3gc_epochs,
-                    batch_size=args.s3gc_batch_size,
-                    learning_rate=args.s3gc_lr,
-                    weight_decay=args.s3gc_weight_decay,
-                    walk_length=args.s3gc_walk_length,
-                    context_size=args.s3gc_context_size,
-                    walks_per_node=args.s3gc_walks_per_node,
-                    num_negative_samples=args.s3gc_num_negative_samples,
-                    diffusion_hops=args.s3gc_diffusion_hops,
-                    ppr_alpha=args.s3gc_ppr_alpha,
-                    scale=args.s3gc_scale,
-                    seed=args.s3gc_seed,
-                    device=device,
-                    print_every=args.s3gc_print_every,
-                )
             else:
-                raise ValueError(
-                    f"Unknown spectral embedding method: {args.spectral_embedding_method!r}"
+                spectral_embeddings = build_selected_graph_embeddings(
+                    method=args.spectral_embedding_method,
+                    A=A,
+                    x=x,
+                    edge_index=edge_index,
+                    edge_weight=edge_weight,
+                    args=args,
+                    device=device,
                 )
             A_embedding = build_embedding_knn_adj(spectral_embeddings, args.spectral_knn)
             print(
@@ -861,37 +920,15 @@ def recursive_hierarchy(
                 f"fusion_alpha={args.spectral_fusion_alpha}"
             )
     elif method == "recursive_kmeans":
-        if args.graph_embedding_method == "fastrp":
-            graph_embeddings = build_fastrp_embeddings(
-                adjacency=A,
-                node_features=x,
-                embedding_dim=args.fastrp_dim,
-                iteration_weights=args.fastrp_iteration_weights,
-                feature_weight=args.fastrp_feature_weight,
-                seed=args.fastrp_seed,
-            )
-        elif args.graph_embedding_method == "s3gc":
-            graph_embeddings = build_s3gc_embeddings(
-                edge_index=edge_index,
-                node_features=x,
-                embedding_dim=args.s3gc_dim,
-                epochs=args.s3gc_epochs,
-                batch_size=args.s3gc_batch_size,
-                learning_rate=args.s3gc_lr,
-                weight_decay=args.s3gc_weight_decay,
-                walk_length=args.s3gc_walk_length,
-                context_size=args.s3gc_context_size,
-                walks_per_node=args.s3gc_walks_per_node,
-                num_negative_samples=args.s3gc_num_negative_samples,
-                diffusion_hops=args.s3gc_diffusion_hops,
-                ppr_alpha=args.s3gc_ppr_alpha,
-                scale=args.s3gc_scale,
-                seed=args.s3gc_seed,
-                device=device,
-                print_every=args.s3gc_print_every,
-            )
-        else:
-            raise ValueError(f"Unknown graph embedding method: {args.graph_embedding_method!r}")
+        graph_embeddings = build_selected_graph_embeddings(
+            method=args.graph_embedding_method,
+            A=A,
+            x=x,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
+            args=args,
+            device=device,
+        )
         print(
             f"Built {args.graph_embedding_method} graph embeddings: "
             f"shape={graph_embeddings.shape}"
@@ -976,37 +1013,16 @@ def recursive_leiden_hierarchy(
     if args.leiden_fusion_alpha > 0.0:
         if args.leiden_embedding_method == "semantic":
             leiden_embeddings = x
-        elif args.leiden_embedding_method == "fastrp":
-            leiden_embeddings = build_fastrp_embeddings(
-                adjacency=A,
-                node_features=x,
-                embedding_dim=args.fastrp_dim,
-                iteration_weights=args.fastrp_iteration_weights,
-                feature_weight=args.fastrp_feature_weight,
-                seed=args.fastrp_seed,
-            )
-        elif args.leiden_embedding_method == "s3gc":
-            leiden_embeddings = build_s3gc_embeddings(
-                edge_index=edge_index,
-                node_features=x,
-                embedding_dim=args.s3gc_dim,
-                epochs=args.s3gc_epochs,
-                batch_size=args.s3gc_batch_size,
-                learning_rate=args.s3gc_lr,
-                weight_decay=args.s3gc_weight_decay,
-                walk_length=args.s3gc_walk_length,
-                context_size=args.s3gc_context_size,
-                walks_per_node=args.s3gc_walks_per_node,
-                num_negative_samples=args.s3gc_num_negative_samples,
-                diffusion_hops=args.s3gc_diffusion_hops,
-                ppr_alpha=args.s3gc_ppr_alpha,
-                scale=args.s3gc_scale,
-                seed=args.s3gc_seed,
-                device=device,
-                print_every=args.s3gc_print_every,
-            )
         else:
-            raise ValueError(f"Unknown Leiden embedding method: {args.leiden_embedding_method!r}")
+            leiden_embeddings = build_selected_graph_embeddings(
+                method=args.leiden_embedding_method,
+                A=A,
+                x=x,
+                edge_index=edge_index,
+                edge_weight=edge_weight,
+                args=args,
+                device=device,
+            )
         A_embedding = build_embedding_knn_adj(leiden_embeddings, args.leiden_knn)
         print(
             f"Built {args.leiden_embedding_method} embedding kNN graph for Leiden: "
@@ -1354,7 +1370,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--spectral_embedding_method",
-        choices=["semantic", "fastrp", "s3gc"],
+        choices=["semantic", "fastrp", "s3gc", "magi", "ns4gc"],
         default="semantic",
         help="Embedding source converted to a cosine kNN graph for recursive_spectral.",
     )
@@ -1376,7 +1392,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--graph_embedding_method",
-        choices=["fastrp", "s3gc"],
+        choices=["fastrp", "s3gc", "magi", "ns4gc"],
         default="fastrp",
         help="Graph-to-feature preprocessing used by recursive_kmeans.",
     )
@@ -1408,9 +1424,46 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--s3gc_seed", type=int, default=42)
     parser.add_argument("--s3gc_print_every", type=int, default=10)
+    parser.add_argument("--magi_dim", type=int, default=256)
+    parser.add_argument("--magi_num_layers", type=int, default=2)
+    parser.add_argument("--magi_epochs", type=int, default=200)
+    parser.add_argument("--magi_batch_size", type=int, default=512)
+    parser.add_argument("--magi_lr", type=float, default=0.001)
+    parser.add_argument("--magi_weight_decay", type=float, default=0.0)
+    parser.add_argument("--magi_num_neighbors", type=int, default=10)
+    parser.add_argument("--magi_num_walks", type=int, default=20)
+    parser.add_argument("--magi_walk_length", type=int, default=4)
+    parser.add_argument("--magi_inference_batch_size", type=int, default=2048)
+    parser.add_argument("--magi_inference_neighbors", type=int, default=15)
+    parser.add_argument("--magi_temperature", type=float, default=0.5)
+    parser.add_argument("--magi_seed", type=int, default=42)
+    parser.add_argument("--magi_print_every", type=int, default=10)
+    parser.add_argument("--ns4gc_dim", type=int, default=256)
+    parser.add_argument("--ns4gc_num_layers", type=int, default=2)
+    parser.add_argument("--ns4gc_epochs", type=int, default=200)
+    parser.add_argument("--ns4gc_batch_size", type=int, default=1024)
+    parser.add_argument("--ns4gc_lr", type=float, default=0.001)
+    parser.add_argument("--ns4gc_weight_decay", type=float, default=0.0)
+    parser.add_argument("--ns4gc_num_neighbors", type=int, default=15)
+    parser.add_argument("--ns4gc_inference_batch_size", type=int, default=2048)
+    parser.add_argument("--ns4gc_inference_neighbors", type=int, default=15)
+    parser.add_argument("--ns4gc_feature_mask", type=float, default=0.2)
+    parser.add_argument("--ns4gc_edge_drop", type=float, default=0.3)
+    parser.add_argument("--ns4gc_similarity_threshold", type=float, default=0.6)
+    parser.add_argument("--ns4gc_temperature", type=float, default=0.1)
+    parser.add_argument("--ns4gc_neighbor_weight", type=float, default=1.0)
+    parser.add_argument("--ns4gc_sparsity_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--ns4gc_training_mode",
+        choices=["sampled", "full"],
+        default="sampled",
+    )
+    parser.add_argument("--ns4gc_max_full_nodes", type=int, default=10000)
+    parser.add_argument("--ns4gc_seed", type=int, default=42)
+    parser.add_argument("--ns4gc_print_every", type=int, default=10)
     parser.add_argument(
         "--leiden_embedding_method",
-        choices=["semantic", "fastrp", "s3gc"],
+        choices=["semantic", "fastrp", "s3gc", "magi", "ns4gc"],
         default="semantic",
         help="Embedding source converted to a cosine kNN graph for recursive_leiden.",
     )
@@ -1497,6 +1550,7 @@ def main() -> None:
         make_undirected=not args.directed,
         skip_n_last=args.skip_n_last,
     )
+    args.input_has_edge_weight = edge_weight is not None
 
     print(f"Method: {args.method}")
     print(f"Loaded graph nodes used: {x_graph.size(0)}, edges used: {edge_index.size(1)}, emb dim: {x_graph.size(1)}")
