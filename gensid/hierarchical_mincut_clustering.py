@@ -201,6 +201,11 @@ def relabel_compact(labels: np.ndarray) -> np.ndarray:
 
 def graph_embedding_metadata(method: str, args: argparse.Namespace) -> Dict[str, Any]:
     """Return method-specific graph embedding configuration for run metadata."""
+    if method == "semantic":
+        return {
+            "semantic_embedding_source": "input_item_embeddings",
+            "semantic_uses_graph": False,
+        }
     if method == "fastrp":
         return {
             "fastrp_dim": int(args.fastrp_dim),
@@ -421,7 +426,9 @@ def build_selected_graph_embeddings(
     args: argparse.Namespace,
     device: torch.device,
 ) -> np.ndarray:
-    """Run one graph-aware embedding backend through its method-specific module."""
+    """Return semantic features or run a graph-aware embedding backend."""
+    if method == "semantic":
+        return x.detach().cpu().numpy().astype(np.float32, copy=False)
     if method == "fastrp":
         return build_fastrp_embeddings(
             adjacency=A,
@@ -930,7 +937,7 @@ def recursive_hierarchy(
             device=device,
         )
         print(
-            f"Built {args.graph_embedding_method} graph embeddings: "
+            f"Prepared {args.graph_embedding_method} clustering embeddings: "
             f"shape={graph_embeddings.shape}"
         )
 
@@ -1392,9 +1399,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--graph_embedding_method",
-        choices=["fastrp", "s3gc", "magi", "ns4gc"],
-        default="fastrp",
-        help="Graph-to-feature preprocessing used by recursive_kmeans.",
+        choices=["semantic", "fastrp", "s3gc", "magi", "ns4gc"],
+        default="semantic",
+        help="Embedding source used by recursive_kmeans; semantic uses the input item embeddings directly.",
     )
     parser.add_argument("--fastrp_dim", type=int, default=256)
     parser.add_argument("--fastrp_feature_weight", type=float, default=1.0)

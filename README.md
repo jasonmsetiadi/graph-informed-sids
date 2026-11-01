@@ -46,6 +46,7 @@ bash scripts/run_s2gr.sh
 bash scripts/run_mmgrec.sh
 bash scripts/run_gae_components_ablation.sh          # TIGER, RQ-GAE, RQ-GAE w/o graph-loss, RQ-GAE w/o graph-input
 bash scripts/run_recdmon.sh
+bash scripts/run_reckmeans.sh semantic                # Recursive K-means over the original semantic embeddings
 bash scripts/run_reckmeans.sh fastrp                 # Recursive K-means over FastRP embeddings
 bash scripts/run_recspectral.sh semantic             # Recursive spectral with semantic-embedding kNN fusion
 bash scripts/run_recspectral.sh fastrp               # Recursive spectral with FastRP-embedding kNN fusion
@@ -58,8 +59,10 @@ bash scripts/run_recspectral.sh ns4gc                # Local weighted NS4GC, sam
 NS4GC_TRAINING_MODE=full bash scripts/run_reckmeans.sh ns4gc  # Exact small-graph NS4GC
 ```
 
-Graph-aware embedding choices are `fastrp`, `s3gc`, `magi`, and `ns4gc`.
-Recursive spectral and Leiden additionally accept `semantic` for the original item embeddings.
+Embedding choices are `semantic`, `fastrp`, `s3gc`, `magi`, and `ns4gc`.
+For recursive K-means, `semantic` clusters the original item embeddings directly. For
+recursive spectral and Leiden, it converts those embeddings into a cosine kNN graph.
+All three recursive clustering runners default to `semantic`.
 The `ns4gc` backend is a local weighted variant rather than the standard unweighted
 PyAGC objective. It uses raw interaction edge weights in GCN propagation and the
 neighbor-consistency loss, falling back to unit weights only when weights are absent.
