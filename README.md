@@ -14,8 +14,12 @@ conda create -n gr_env python=3.11 -y
 conda activate gr_env
 pip install -r requirements.txt
 pip install torch_geometric pyg_lib torch_scatter torch_sparse torch_cluster \
-  -f https://data.pyg.org/whl/torch-2.11.0+cu130.html
+  -f https://data.pyg.org/whl/torch-2.11.0+cu126.html
 ```
+
+The pinned PyTorch CUDA 12.6 build supports NVIDIA V100 GPUs (compute capability
+7.0). On a machine without a compatible NVIDIA GPU, install the CPU-only PyTorch
+build instead of using the CUDA wheel index above.
 
 ## Reproducing Experiments
 
