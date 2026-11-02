@@ -554,16 +554,24 @@ def spectral_cluster_subset(
     return labels.astype(np.int64)
 
 
-def adaptive_branch_count(A: sp.csr_matrix, subset: np.ndarray, max_branches: int) -> int:
+def adaptive_branch_count(
+    A: sp.csr_matrix,
+    subset: np.ndarray,
+    max_branches: int,
+    context: str = "adaptive split",
+) -> int:
     """Choose a local branch count from the largest normalized-Laplacian eigengap."""
     n = int(len(subset))
     if n <= 1:
+        print(f"  {context}: nodes={n}, selected k=1 (singleton)", flush=True)
         return 1
     upper = min(int(max_branches), n - 1)
     if upper <= 1:
+        print(f"  {context}: nodes={n}, selected k=1 (no larger candidate)", flush=True)
         return 1
     A_sub = A[subset][:, subset].astype(np.float64).tocsr()
     if A_sub.nnz == 0:
+        print(f"  {context}: nodes={n}, selected k=1 (no internal edges)", flush=True)
         return 1
     degree = np.asarray(A_sub.sum(axis=1)).reshape(-1)
     inv_sqrt = 1.0 / np.sqrt(np.maximum(degree, 1e-12))
@@ -578,7 +586,22 @@ def adaptive_branch_count(A: sp.csr_matrix, subset: np.ndarray, max_branches: in
         values = np.sort(values)
         gaps = np.diff(values)[:upper]
         if gaps.size:
-            return int(np.argmax(gaps)) + 1
+            for candidate_idx, gap in enumerate(gaps):
+                candidate_k = candidate_idx + 1
+                print(
+                    f"  {context}: k={candidate_k}, "
+                    f"lambda_k={values[candidate_idx]:.6g}, "
+                    f"lambda_k+1={values[candidate_idx + 1]:.6g}, "
+                    f"eigengap={gap:.6g}",
+                    flush=True,
+                )
+            selected_k = int(np.argmax(gaps)) + 1
+            print(
+                f"  {context}: selected k={selected_k} "
+                f"with eigengap={gaps[selected_k - 1]:.6g}",
+                flush=True,
+            )
+            return selected_k
     except Exception as error:
         print(f"[warn] adaptive eigengap failed for subset size={n}: {error}. Keeping one branch.")
     return 1
@@ -989,7 +1012,12 @@ def recursive_hierarchy(
                 local_history = []
             else:
                 k = (
-                    adaptive_branch_count(A, subset, factor)
+                    adaptive_branch_count(
+                        A,
+                        subset,
+                        factor,
+                        context=f"{method} level {level}, parent {parent}",
+                    )
                     if method in {"recursive_spectral", "recursive_dmon"}
                     else min(factor, len(subset))
                 )
