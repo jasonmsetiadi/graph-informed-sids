@@ -12,9 +12,10 @@ Methods:
   - recursive_dmon: top-down recursive local DMoN-style modularity splits.
 
 For recursive spectral and DMoN, --recursive_factor is the maximum child count.
-The local count is proposed by the largest normalized-Laplacian eigengap for
-k >= 2, then accepted only when the resulting partition has sufficient local
-weighted-modularity gain. Branches stop when the proposal is rejected.
+Spectral proposes k >= 2 from the largest normalized-Laplacian eigengap and
+validates the partition with local weighted modularity. DMoN trains every
+k >= 2 candidate and selects the partition with the highest local weighted
+modularity. Branches stop when the best proposal lacks sufficient gain.
 Graph-embedding KMeans retains its fixed factor and level behavior.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
@@ -341,6 +342,8 @@ def save_outputs(
                 metadata["recursive_factor_max"] = int(args.recursive_factor)
                 metadata["recursive_branch_selection"] = (
                     "normalized_laplacian_largest_nontrivial_eigengap_then_local_modularity_gain"
+                    if args.method == "recursive_spectral"
+                    else "dmon_candidate_sweep_highest_local_modularity_gain"
                 )
                 metadata["recursive_min_modularity_gain"] = float(args.recursive_min_modularity_gain)
         else:
@@ -906,6 +909,7 @@ def neural_cluster_subset(
     k: int,
     args: argparse.Namespace,
     device: torch.device,
+    seed: int | None = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     n = int(len(subset))
     if n == 0:
@@ -918,6 +922,11 @@ def neural_cluster_subset(
         raise ValueError(
             f"Recursive {method} local subset has {n} nodes, above --max_dense_nodes={args.max_dense_nodes}."
         )
+
+    if seed is not None:
+        torch.manual_seed(seed)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(seed)
 
     A_sub_np = A[subset][:, subset].astype(np.float32).toarray()
     x_sub = x_all[torch.as_tensor(subset, dtype=torch.long)].to(device)
@@ -957,6 +966,93 @@ def neural_cluster_subset(
     with torch.no_grad():
         labels = model(x_sub).argmax(dim=-1).cpu().numpy().astype(np.int64)
     return labels, history
+
+
+def adaptive_dmon_split(
+    x_all: torch.Tensor,
+    A: sp.csr_matrix,
+    subset: np.ndarray,
+    max_branches: int,
+    args: argparse.Namespace,
+    device: torch.device,
+    seed: int,
+    context: str,
+) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+    """Select a local DMoN split by sweeping k and maximizing hard modularity."""
+    n = int(len(subset))
+    upper = min(int(max_branches), n - 1)
+    if upper < 2:
+        print(f"  {context}: nodes={n}, no DMoN split candidate", flush=True)
+        return np.zeros(n, dtype=np.int64), []
+
+    A_sub = A[subset][:, subset]
+    if A_sub.nnz == 0 or float(A_sub.sum()) <= 0.0:
+        print(f"  {context}: no positive internal edge weight; keeping one branch", flush=True)
+        return np.zeros(n, dtype=np.int64), []
+
+    candidates: List[Tuple[int, np.ndarray, float, int]] = []
+    history: List[Dict[str, float]] = []
+    for k in range(2, upper + 1):
+        print(f"  {context}: training DMoN candidate k={k}", flush=True)
+        candidate_labels, candidate_history = neural_cluster_subset(
+            method="recursive_dmon",
+            x_all=x_all,
+            A=A,
+            subset=subset,
+            k=k,
+            args=args,
+            device=device,
+            seed=seed + k * 100_003,
+        )
+        history.extend(candidate_history)
+        children = int(len(np.unique(candidate_labels)))
+        gain = local_weighted_modularity_gain(A, subset, candidate_labels)
+        valid = children > 1
+        print(
+            f"  {context}: k={k}, children={children}, "
+            f"local_modularity_gain={gain:.6g}, valid={valid}",
+            flush=True,
+        )
+        history.append(
+            {
+                "candidate_k": float(k),
+                "candidate_children": float(children),
+                "candidate_modularity_gain": float(gain),
+                "candidate_valid": float(valid),
+            }
+        )
+        candidates.append((k, candidate_labels, gain, children))
+
+    valid_candidates = [candidate for candidate in candidates if candidate[3] > 1]
+    if not valid_candidates:
+        print(f"  {context}: all DMoN candidates collapsed; keeping one branch", flush=True)
+        return np.zeros(n, dtype=np.int64), history
+
+    # Exact score ties prefer the simpler partition with the smaller requested k.
+    selected_k, selected_labels, selected_gain, selected_children = max(
+        valid_candidates,
+        key=lambda candidate: (candidate[2], -candidate[0]),
+    )
+    split_accepted = selected_gain > args.recursive_min_modularity_gain
+    print(
+        f"  {context}: selected k={selected_k}, children={selected_children}, "
+        f"local_modularity_gain={selected_gain:.6g}, "
+        f"threshold={args.recursive_min_modularity_gain:.6g}, "
+        f"split={'accepted' if split_accepted else 'rejected'}",
+        flush=True,
+    )
+    history.append(
+        {
+            "selected_k": float(selected_k),
+            "selected_children": float(selected_children),
+            "modularity_gain": float(selected_gain),
+            "modularity_threshold": float(args.recursive_min_modularity_gain),
+            "split_accepted": float(split_accepted),
+        }
+    )
+    if not split_accepted:
+        return np.zeros(n, dtype=np.int64), history
+    return selected_labels, history
 
 
 # -----------------------------------------------------------------------------
@@ -1043,16 +1139,15 @@ def recursive_hierarchy(
                 local_history = []
             else:
                 split_context = f"{method} level {level}, parent {parent}"
-                k = (
-                    adaptive_branch_count(
+                if method == "recursive_spectral":
+                    k = adaptive_branch_count(
                         A,
                         subset,
                         factor,
                         context=split_context,
                     )
-                    if method in {"recursive_spectral", "recursive_dmon"}
-                    else min(factor, len(subset))
-                )
+                elif method == "recursive_kmeans":
+                    k = min(factor, len(subset))
 
                 if method == "recursive_spectral":
                     local = spectral_cluster_subset(
@@ -1072,18 +1167,21 @@ def recursive_hierarchy(
                         seed=rng_seed + level * 1009 + int(parent),
                     )
                     local_history = []
-                else:
-                    local, local_history = neural_cluster_subset(
-                        method=method,
+                elif method == "recursive_dmon":
+                    local, local_history = adaptive_dmon_split(
                         x_all=x,
                         A=A,
                         subset=subset,
-                        k=k,
+                        max_branches=factor,
                         args=args,
                         device=device,
+                        seed=rng_seed + level * 1009 + int(parent),
+                        context=split_context,
                     )
+                else:
+                    raise ValueError(f"Unsupported recursive method: {method}")
 
-                if method in {"recursive_spectral", "recursive_dmon"} and k > 1:
+                if method == "recursive_spectral" and k > 1:
                     proposed_children = int(len(np.unique(local)))
                     modularity_gain = local_weighted_modularity_gain(A, subset, local)
                     split_accepted = (
