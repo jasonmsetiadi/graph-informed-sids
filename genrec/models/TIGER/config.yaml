@@ -20,6 +20,7 @@ rq_faiss: False
 faiss_omp_num_threads: 32
 rq_n_codebooks: 3
 rq_codebook_size: 256
+variable_length_sids: false  # Ragged catalog SIDs with a shared terminal-leaf codebook.
 
 # Config for RQ-VAE
 # Omit this part if using Faiss instead of training RQ-VAE from scratch

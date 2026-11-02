@@ -54,6 +54,7 @@ def _write_shell_env_file(
     sem_ids_path: Path,
     dataset: str,
     codebook_sizes: list[int],
+    variable_length_sids: bool,
 ) -> Path:
     codebook_sizes_str = ",".join(map(str, codebook_sizes))
     lines = [
@@ -63,6 +64,7 @@ def _write_shell_env_file(
         f"export GR_SEM_IDS_BASENAME={shlex.quote(sem_ids_path.name)}",
         f"export GR_SEM_IDS_CODEBOOK_SIZES={shlex.quote(codebook_sizes_str)}",
         f"export GR_SEM_IDS_DEPTH={len(codebook_sizes)}",
+        f"export GR_SEM_IDS_VARIABLE_LENGTH={'True' if variable_length_sids else 'False'}",
         f"export GR_DATASET={shlex.quote(dataset)}",
         "",
     ]
@@ -109,7 +111,11 @@ def _sid_token_to_int(token: Any) -> int:
     raise TypeError(f"Unsupported SID token type: {type(token).__name__}: {token!r}")
 
 
-def _normalize_letter_sids(letter_sids: dict[str, Any]) -> dict[int, list[int]]:
+def _normalize_letter_sids(
+    letter_sids: dict[str, Any],
+    *,
+    variable_length_sids: bool = False,
+) -> dict[int, list[int]]:
     """Convert LETTER item_id -> token list into int item_id -> int SID list."""
     out: dict[int, list[int]] = {}
     for item_id, sid in letter_sids.items():
@@ -118,8 +124,10 @@ def _normalize_letter_sids(letter_sids: dict[str, Any]) -> dict[int, list[int]]:
         out[int(item_id)] = [_sid_token_to_int(tok) for tok in sid]
 
     lengths = {len(v) for v in out.values()}
-    if len(lengths) != 1:
+    if not variable_length_sids and len(lengths) != 1:
         raise ValueError(f"All SIDs must have the same length, got lengths={sorted(lengths)}")
+    if variable_length_sids and any(length < 2 for length in lengths):
+        raise ValueError("Variable-length SIDs must contain at least one hierarchy token and one leaf token")
     return out
 
 
@@ -132,6 +140,31 @@ def _infer_codebook_sizes(sids: Iterable[list[int]]) -> list[int]:
     for col in range(sid_array.shape[1]):
         non_negative = sid_array[:, col][sid_array[:, col] >= 0]
         sizes.append(int(non_negative.max()) + 1 if non_negative.size else 0)
+    return sizes
+
+
+def _infer_variable_codebook_sizes(sids: Iterable[list[int]]) -> list[int]:
+    """Infer per-level cluster sizes plus one shared terminal-leaf size."""
+    sid_lists = [list(map(int, sid)) for sid in sids]
+    if not sid_lists:
+        raise ValueError("Cannot infer codebook sizes from an empty SID mapping")
+    max_sid_length = max(map(len, sid_lists))
+    if max_sid_length < 2:
+        raise ValueError("Variable-length SIDs require a hierarchy token and a terminal leaf")
+
+    sizes: list[int] = []
+    for level_idx in range(max_sid_length - 1):
+        values = [sid[level_idx] for sid in sid_lists if level_idx < len(sid) - 1]
+        if not values:
+            raise ValueError(f"No hierarchy tokens found for level {level_idx + 1}")
+        if min(values) < 0:
+            raise ValueError(f"Negative hierarchy token at level {level_idx + 1}")
+        sizes.append(max(values) + 1)
+
+    leaves = [sid[-1] for sid in sid_lists]
+    if min(leaves) < 0:
+        raise ValueError("Terminal leaf tokens must be non-negative")
+    sizes.append(max(leaves) + 1)
     return sizes
 
 
@@ -161,6 +194,7 @@ def letter_sid_mapping_to_gr_sem_ids(
     output_path_file: str | Path | None = None,
     env_file: str | Path | None = None,
     quiet: bool = False,
+    variable_length_sids: bool = False,
 ) -> Path:
     """
     Convert a LETTER-style SID mapping to GR .sem_ids.
@@ -188,7 +222,10 @@ def letter_sid_mapping_to_gr_sem_ids(
 
     with open(sid_mapping_path, "r") as f:
         letter_sids_raw = json.load(f)
-    letter_sids = _normalize_letter_sids(letter_sids_raw)
+    letter_sids = _normalize_letter_sids(
+        letter_sids_raw,
+        variable_length_sids=variable_length_sids,
+    )
 
     missing_items = sorted(set(letter_sids) - set(raw_id2asin))
     if missing_items:
@@ -199,7 +236,11 @@ def letter_sid_mapping_to_gr_sem_ids(
         )
 
     gr_sids = {raw_id2asin[item_id]: sid for item_id, sid in sorted(letter_sids.items())}
-    codebook_sizes = _infer_codebook_sizes(gr_sids.values())
+    codebook_sizes = (
+        _infer_variable_codebook_sizes(gr_sids.values())
+        if variable_length_sids
+        else _infer_codebook_sizes(gr_sids.values())
+    )
 
     expected_n = DATASET_N_ITEMS.get(dataset)
     if expected_n is not None and len(gr_sids) != expected_n:
@@ -232,6 +273,7 @@ def letter_sid_mapping_to_gr_sem_ids(
             sem_ids_path=out_path,
             dataset=dataset,
             codebook_sizes=codebook_sizes,
+            variable_length_sids=variable_length_sids,
         )
         _log(f"Saved shell env handoff file to: {env_path}", quiet=quiet)
 
@@ -239,6 +281,7 @@ def letter_sid_mapping_to_gr_sem_ids(
     _log(f"Saved GR .sem_ids to: {out_path}", quiet=quiet)
     _log(f"Items converted: {len(gr_sids)}", quiet=quiet)
     _log(f"SID depth: {len(codebook_sizes)}", quiet=quiet)
+    _log(f"Variable-length SIDs: {variable_length_sids}", quiet=quiet)
     _log(f"Inferred codebook sizes: {','.join(map(str, codebook_sizes))}", quiet=quiet)
 
     return out_path
@@ -317,6 +360,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Suppress human-readable status logs. Intended for command substitution.",
     )
+    parser.add_argument(
+        "--variable_length_sids",
+        action="store_true",
+        help="Accept ragged SIDs and treat each final token as a shared terminal leaf codebook.",
+    )
     return parser.parse_args()
 
 
@@ -330,6 +378,7 @@ def main() -> None:
         output_path_file=args.output_path_file,
         env_file=args.env_file,
         quiet=args.quiet,
+        variable_length_sids=args.variable_length_sids,
     )
     if args.print_output_path:
         print(out_path)

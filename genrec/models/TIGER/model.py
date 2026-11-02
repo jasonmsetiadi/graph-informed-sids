@@ -3,6 +3,7 @@ from transformers import T5Config, T5ForConditionalGeneration
 
 from genrec.model import AbstractModel
 from genrec.dataset import AbstractDataset
+from genrec.semantic_id_trie import SemanticIDTrie
 from genrec.tokenizer import AbstractTokenizer
 
 
@@ -53,6 +54,11 @@ class TIGER(AbstractModel):
         )
 
         self.t5 = T5ForConditionalGeneration(config=t5config)
+        self.sid_trie = (
+            SemanticIDTrie(tokenizer.item2tokens.values())
+            if tokenizer.variable_length_sids
+            else None
+        )
 
     @property
     def n_parameters(self) -> str:
@@ -100,6 +106,18 @@ class TIGER(AbstractModel):
         num_beams = self.config['num_beams']
         batch_size = batch['input_ids'].shape[0]
 
+        generation_kwargs = {}
+        if self.tokenizer.variable_length_sids:
+            def prefix_allowed_tokens_fn(batch_id, decoder_input_ids):
+                del batch_id
+                prefix = decoder_input_ids.tolist()[1:]  # remove decoder-start token
+                return self.sid_trie.allowed_tokens(prefix, self.tokenizer.eos_token)
+
+            generation_kwargs.update(
+                prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+                early_stopping=True,
+            )
+
         with torch.no_grad():
             outputs = self.t5.generate(
                 input_ids=batch['input_ids'],
@@ -110,6 +128,7 @@ class TIGER(AbstractModel):
                 return_dict_in_generate=True,
                 output_scores=True,
                 use_cache=True,
+                **generation_kwargs,
             )
 
         # 1. Process Sequences
@@ -119,11 +138,40 @@ class TIGER(AbstractModel):
         # Reshape to (batch_size, n_return_sequences, seq_len)
         sequences = sequences.reshape(batch_size, n_return_sequences, seq_len)
         
-        # Extract semantic tokens (skip decoder_start_token)
-        pred_tokens = sequences[:, :, 1:1+n_digit]
+        if self.tokenizer.variable_length_sids:
+            pred_tokens = torch.full(
+                (batch_size, n_return_sequences, n_digit),
+                self.tokenizer.padding_token,
+                dtype=sequences.dtype,
+                device=sequences.device,
+            )
+            pred_lengths = torch.zeros(
+                (batch_size, n_return_sequences),
+                dtype=torch.long,
+                device=sequences.device,
+            )
+            for batch_idx in range(batch_size):
+                for beam_idx in range(n_return_sequences):
+                    decoded = sequences[batch_idx, beam_idx, 1:].tolist()
+                    sid = []
+                    for token in decoded:
+                        if token in {self.tokenizer.eos_token, self.tokenizer.padding_token}:
+                            break
+                        sid.append(int(token))
+                    length = min(len(sid), n_digit)
+                    if length:
+                        pred_tokens[batch_idx, beam_idx, :length] = torch.as_tensor(
+                            sid[:length], device=sequences.device, dtype=sequences.dtype
+                        )
+                    pred_lengths[batch_idx, beam_idx] = length
+        else:
+            # Extract fixed-width semantic tokens (skip decoder-start token).
+            pred_tokens = sequences[:, :, 1:1+n_digit]
 
         out = {'preds': pred_tokens}
-        if self.maybe_duplicates:
+        if self.tokenizer.variable_length_sids:
+            out['pred_lengths'] = pred_lengths
+        elif self.maybe_duplicates:
             out['collision_cnts'] = torch.tensor(
                 [[self.sid_collisions.get(tuple(ki), 1) for ki in topk] for topk in pred_tokens.cpu().numpy().tolist()],
                 device=pred_tokens.device

@@ -69,8 +69,7 @@ SEEDS=(42 43 44)
 
 CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
-RECURSIVE_FACTOR=6
-RECURSIVE_LEVELS=4
+RECURSIVE_FACTOR="${RECURSIVE_FACTOR:-10}"
 
 GENSID_DIR="./gensid"
 
@@ -163,6 +162,14 @@ for SEED in "${SEEDS[@]}"; do
   echo "########################################"
 
   CLUSTERING_ARGS=(--method "${CLUSTERING_METHOD}")
+  SID_INDEX_ARGS=()
+  MAPPER_VARIABLE_LENGTH_ARG=""
+  case "${CLUSTERING_METHOD}" in
+    recursive_leiden|recursive_spectral|recursive_dmon)
+      SID_INDEX_ARGS+=(--variable_length)
+      MAPPER_VARIABLE_LENGTH_ARG="--variable_length_sids"
+      ;;
+  esac
   if [[ "${CLUSTERING_METHOD}" == "stacked_dmon" ]]; then
     CLUSTERING_ARGS+=(--cluster_sizes "${CLUSTER_SIZES[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
@@ -174,7 +181,6 @@ for SEED in "${SEEDS[@]}"; do
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_ARGS+=(
       --recursive_factor "${RECURSIVE_FACTOR}"
-      --recursive_levels "${RECURSIVE_LEVELS}"
     )
   fi
 
@@ -205,6 +211,7 @@ for SEED in "${SEEDS[@]}"; do
       --output_file "${GENSID_CACHE_DIR}/${DATASET}/${DATASET}${INDEX_FILE}" \
       --label_group coarse_to_fine_item_labels \
       --unclustered_strategy special \
+      "${SID_INDEX_ARGS[@]}" \
       --append_unique_leaf
 
   # =========================
@@ -223,6 +230,7 @@ for SEED in "${SEEDS[@]}"; do
     --sid_mapping_path '${GR_SID_MAPPING_PATH}' \
     --gr_path '${GR_PATH}' \
     --dataset '${DATASET}' \
+    ${MAPPER_VARIABLE_LENGTH_ARG} \
     --env_file '${MAP_ENV}'
   "
 
@@ -235,10 +243,12 @@ for SEED in "${SEEDS[@]}"; do
     : "${GR_SEM_IDS_PATH:?Missing GR_SEM_IDS_PATH in ${MAP_ENV}}"
     : "${GR_SEM_IDS_DEPTH:?Missing GR_SEM_IDS_DEPTH in ${MAP_ENV}}"
     : "${GR_SEM_IDS_CODEBOOK_SIZES:?Missing GR_SEM_IDS_CODEBOOK_SIZES in ${MAP_ENV}}"
+    : "${GR_SEM_IDS_VARIABLE_LENGTH:?Missing GR_SEM_IDS_VARIABLE_LENGTH in ${MAP_ENV}}"
 
-    echo "Using fixed GR SID mapping: ${GR_SEM_IDS_PATH}"
+    echo "Using GR SID mapping: ${GR_SEM_IDS_PATH}"
     echo "SID depth: ${GR_SEM_IDS_DEPTH}"
     echo "Codebook sizes: ${GR_SEM_IDS_CODEBOOK_SIZES}"
+    echo "Variable-length SIDs: ${GR_SEM_IDS_VARIABLE_LENGTH}"
   fi
 
   # =========================
@@ -262,6 +272,7 @@ for SEED in "${SEEDS[@]}"; do
       --sem_ids_path='${GR_SEM_IDS_PATH}' \
       --rq_n_codebooks='${GR_SEM_IDS_DEPTH}' \
       --rq_codebook_size='${GR_SEM_IDS_CODEBOOK_SIZES}' \
+      --variable_length_sids='${GR_SEM_IDS_VARIABLE_LENGTH}' \
       --config=aux_configs/mmgrec.yaml \
       2>&1 | tee '${LOG_FILE}'
     "

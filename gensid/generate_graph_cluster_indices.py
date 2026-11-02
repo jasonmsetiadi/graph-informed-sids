@@ -165,18 +165,76 @@ def make_contiguous_per_level(labels: list[np.ndarray], keep_negative: bool = Tr
     return remapped, maps
 
 
+def infer_effective_lengths(labels: list[np.ndarray]) -> np.ndarray:
+    """Infer each item's last real split level from rectangular hierarchy labels."""
+    if not labels:
+        raise ValueError("No label levels were loaded")
+
+    n_items = len(labels[0])
+    lengths = np.ones(n_items, dtype=np.int64)
+    active = labels[0] >= 0
+
+    for level_idx in range(len(labels) - 1):
+        current = labels[level_idx]
+        following = labels[level_idx + 1]
+
+        # A refinement may divide a parent, but it may never merge two parents.
+        valid = (current >= 0) & (following >= 0)
+        for child in np.unique(following[valid]):
+            parents = np.unique(current[valid & (following == child)])
+            if len(parents) != 1:
+                raise ValueError(
+                    f"level_{level_idx + 2} cluster {int(child)} merges "
+                    f"level_{level_idx + 1} parents {parents.tolist()}"
+                )
+
+        if np.any((current < 0) & (following >= 0)):
+            item_id = int(np.where((current < 0) & (following >= 0))[0][0])
+            raise ValueError(
+                f"item_id={item_id} re-enters the hierarchy at level_{level_idx + 2}"
+            )
+        if np.any((current >= 0) & (following < 0)):
+            item_id = int(np.where((current >= 0) & (following < 0))[0][0])
+            raise ValueError(
+                f"item_id={item_id} leaves the hierarchy at level_{level_idx + 2}"
+            )
+
+        split_at_transition = np.zeros(n_items, dtype=bool)
+        for parent in np.unique(current[current >= 0]):
+            members = current == parent
+            children = np.unique(following[members & (following >= 0)])
+            if len(children) > 1:
+                split_at_transition[members] = True
+
+        resumed = (~active) & split_at_transition
+        if np.any(resumed):
+            item_id = int(np.where(resumed)[0][0])
+            raise ValueError(
+                f"Stopped branch containing item_id={item_id} resumes splitting "
+                f"at level_{level_idx + 2}"
+            )
+
+        continued = active & split_at_transition
+        lengths[continued] = level_idx + 2
+        active &= split_at_transition
+
+    return lengths
+
+
 def build_codes(
     labels: list[np.ndarray],
     prefixes: list[str],
     unclustered_strategy: str,
     append_unique_leaf: bool,
     unique_prefix: str,
+    effective_lengths: np.ndarray | None = None,
 ) -> dict[str, list[str]]:
     """
     Convert level labels into token sequences.
 
     unclustered_strategy:
-      - special: use the same special id -1 at every level.
+      - special: use a shared special id at every level (non-negative in
+        variable-length mode so it cannot become downstream padding).
       - unique: use item id as the code for unclustered values.
       - error: fail if any -1 is present.
     append_unique_leaf:
@@ -188,11 +246,26 @@ def build_codes(
         raise ValueError(f"Need at least {len(labels)} token prefixes, got {len(prefixes)}")
 
     n_items = len(labels[0])
+    variable_length = effective_lengths is not None
+    if effective_lengths is None:
+        effective_lengths = np.full(n_items, len(labels), dtype=np.int64)
+    if effective_lengths.shape != (n_items,):
+        raise ValueError(
+            f"effective_lengths must have shape ({n_items},), got {effective_lengths.shape}"
+        )
+    if np.any((effective_lengths < 1) | (effective_lengths > len(labels))):
+        raise ValueError("Every effective SID length must be between 1 and the number of levels")
+
+    special_ids = []
+    for arr in labels:
+        valid = arr[arr >= 0]
+        special_ids.append(int(valid.max()) + 1 if valid.size else 0)
+
     codes: dict[str, list[str]] = {}
 
     for item_id in range(n_items):
         item_tokens = []
-        for level_idx, arr in enumerate(labels):
+        for level_idx, arr in enumerate(labels[: int(effective_lengths[item_id])]):
             cid = int(arr[item_id])
             if cid < 0:
                 if unclustered_strategy == "error":
@@ -200,7 +273,7 @@ def build_codes(
                 if unclustered_strategy == "unique":
                     cid = item_id
                 elif unclustered_strategy == "special":
-                    cid = -1
+                    cid = special_ids[level_idx] if variable_length else -1
                 else:
                     raise ValueError(f"Unknown unclustered_strategy={unclustered_strategy!r}")
             item_tokens.append(prefixes[level_idx].format(cid))
@@ -255,6 +328,11 @@ def parse_args():
         action="store_true",
         help="Append final per-path rank token so full SID is unique even if leaf clusters contain multiple items.",
     )
+    p.add_argument(
+        "--variable_length",
+        action="store_true",
+        help="Infer stopped recursive branches and omit repeated suffix levels from each SID.",
+    )
     p.add_argument("--unique_prefix", default="<z_{}>", help="Format for appended uniqueness token.")
     p.add_argument("--stats_file", default=None, help="Optional path to save stats JSON. Default: output_file + '.stats.json'.")
     return p.parse_args()
@@ -262,6 +340,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.variable_length and not args.append_unique_leaf:
+        raise ValueError("--variable_length requires --append_unique_leaf as the terminal SID token")
 
     level_names, labels = load_cluster_label_levels(
         labels_path=args.labels_path,
@@ -274,6 +354,7 @@ def main():
         labels, remap_maps = make_contiguous_per_level(labels, keep_negative=True)
 
     prefixes = args.prefixes if args.prefixes is not None else make_default_prefixes(len(labels))
+    effective_lengths = infer_effective_lengths(labels) if args.variable_length else None
 
     codes = build_codes(
         labels=labels,
@@ -281,6 +362,7 @@ def main():
         unclustered_strategy=args.unclustered_strategy,
         append_unique_leaf=args.append_unique_leaf,
         unique_prefix=args.unique_prefix,
+        effective_lengths=effective_lengths,
     )
 
     os.makedirs(os.path.dirname(args.output_file) or ".", exist_ok=True)
@@ -295,6 +377,7 @@ def main():
             "levels": level_names,
             "num_levels": len(level_names),
             "append_unique_leaf": bool(args.append_unique_leaf),
+            "variable_length": bool(args.variable_length),
             "unclustered_strategy": args.unclustered_strategy,
             "level_cluster_counts_excluding_minus1": {
                 name: int(len(set(map(int, arr[arr >= 0])))) for name, arr in zip(level_names, labels)
@@ -302,6 +385,16 @@ def main():
             "level_unclustered_counts": {
                 name: int((arr < 0).sum()) for name, arr in zip(level_names, labels)
             },
+        }
+    )
+    sid_lengths = [len(tokens) for tokens in codes.values()]
+    length_counts = Counter(sid_lengths)
+    stats.update(
+        {
+            "sid_length_min": int(min(sid_lengths)) if sid_lengths else 0,
+            "sid_length_max": int(max(sid_lengths)) if sid_lengths else 0,
+            "sid_length_mean": float(np.mean(sid_lengths)) if sid_lengths else 0.0,
+            "sid_length_histogram": {str(length): int(count) for length, count in sorted(length_counts.items())},
         }
     )
     if remap_maps is not None:

@@ -78,16 +78,33 @@ class BaseSIDTokenizer(AbstractTokenizer):
         
         self.dedup_on_creation = config.get("deduplicate_on_creation", False)
         self.dedup_on_load = config.get("deduplicate_on_load", False)
+        self.variable_length_sids = bool(config.get("variable_length_sids", False))
+        self.ignored_label = -100
         self.n_extra_codebooks = self.dedup_on_creation or self.dedup_on_load
+        if self.variable_length_sids and self.n_extra_codebooks:
+            raise ValueError(
+                "variable_length_sids already requires terminal leaves; disable tokenizer deduplication"
+            )
         self.sem_ids_path = self.config.get('sem_ids_path')
         if self.sem_ids_path is None:
             sem_ids_file = self.config.get('sem_ids_file') or self._get_index_factory()
             self.sem_ids_path = os.path.join(dataset.cache_dir, 'processed', sem_ids_file)
         
         self.share_n_codebooks = max(self.config.get("share_n_codebooks", 1), 1)
+        if self.variable_length_sids and self.share_n_codebooks != 1:
+            raise ValueError("variable_length_sids requires disjoint hierarchy codebooks (share_n_codebooks=1)")
         self.item2tokens = self._init_tokenizer(dataset)
+        if self.variable_length_sids and len(set(self.item2tokens.values())) != len(self.item2tokens):
+            raise ValueError("Variable-length SIDs must be unique after terminal leaves are applied")
         self.n_user_tokens = self.config.get('n_user_tokens', 0)
-        if self.n_user_tokens:
+        if self.variable_length_sids:
+            sid_vocab_size = sum(self.codebook_sizes)
+            if self.n_user_tokens:
+                self.base_user_token = sid_vocab_size + 1
+                self.eos_token = self.base_user_token + self.n_user_tokens
+            else:
+                self.eos_token = sid_vocab_size + 1
+        elif self.n_user_tokens:
             self.base_user_token = sum(self.codebook_sizes[self.share_n_codebooks-1:]) + 1
             self.eos_token = self.base_user_token + self.n_user_tokens
         else:
@@ -152,6 +169,42 @@ class BaseSIDTokenizer(AbstractTokenizer):
         Returns:
             dict: A dictionary mapping items to their corresponding tokens.
         """
+        if self.variable_length_sids:
+            codebook_sizes = self.codebook_sizes
+            if len(codebook_sizes) != self.n_digit:
+                raise ValueError(
+                    f"Expected {self.n_digit} codebook sizes, got {len(codebook_sizes)}"
+                )
+            hierarchy_offsets = [sum(codebook_sizes[:digit]) for digit in range(self.n_digit - 1)]
+            terminal_offset = sum(codebook_sizes[:-1])
+
+            for item, raw_sid in item2sem_ids.items():
+                sid = list(raw_sid)
+                if not 2 <= len(sid) <= self.n_digit:
+                    raise ValueError(
+                        f"Variable SID for item {item!r} has length {len(sid)}; "
+                        f"expected between 2 and {self.n_digit}"
+                    )
+                tokens = []
+                for digit, value in enumerate(sid[:-1]):
+                    value = int(value)
+                    if value < 0 or value >= codebook_sizes[digit]:
+                        raise ValueError(
+                            f"Item {item!r} hierarchy token {value} does not fit level {digit + 1} "
+                            f"codebook size {codebook_sizes[digit]}"
+                        )
+                    tokens.append(value + hierarchy_offsets[digit] + 1)
+
+                leaf = int(sid[-1])
+                if leaf < 0 or leaf >= codebook_sizes[-1]:
+                    raise ValueError(
+                        f"Item {item!r} terminal leaf {leaf} does not fit terminal "
+                        f"codebook size {codebook_sizes[-1]}"
+                    )
+                tokens.append(leaf + terminal_offset + 1)
+                item2sem_ids[item] = tuple(tokens)
+            return item2sem_ids
+
         sem_id_offsets = [0]
         for digit in range(1, self.n_digit):
             offset = sem_id_offsets[-1]
@@ -185,7 +238,8 @@ class BaseSIDTokenizer(AbstractTokenizer):
             if not os.path.exists(self.sem_ids_path):
                 item2sem_ids = self._generate_atomic_ids(dataset)
             else:
-                item2sem_ids = json.load(open(self.sem_ids_path, 'r'))
+                with open(self.sem_ids_path, 'r') as f:
+                    item2sem_ids = json.load(f)
             item2tokens = self._sem_ids_to_tokens(item2sem_ids)
             return item2tokens
 
@@ -196,12 +250,15 @@ class BaseSIDTokenizer(AbstractTokenizer):
             self._generate_semantic_ids(sem_ids_path, dataset)
 
         self.log(f'[TOKENIZER] Loading semantic IDs from {sem_ids_path}...')
-        item2sem_ids = json.load(open(sem_ids_path, 'r'))
+        with open(sem_ids_path, 'r') as f:
+            item2sem_ids = json.load(f)
         if self.dedup_on_load:
             item2sem_ids = add_dedup_codebook(item2sem_ids)
 
-        # Verify all SIDs fit in codebooks
-        assert ((np.array(list(item2sem_ids.values())) - np.array(self.codebook_sizes)[None, :]) < 0).all()
+        # Verify fixed-length SIDs fit in their positional codebooks. Ragged
+        # variable-length SIDs are validated while applying their offsets.
+        if not self.variable_length_sids:
+            assert ((np.array(list(item2sem_ids.values())) - np.array(self.codebook_sizes)[None, :]) < 0).all()
         
         item2tokens = self._sem_ids_to_tokens(item2sem_ids)
 
@@ -227,6 +284,10 @@ class BaseSIDTokenizer(AbstractTokenizer):
         if self.use_atomic_ids:
             return 1
         return self.config[self.N_CB_KEY] + self.n_extra_codebooks
+
+    @property
+    def max_sid_length(self):
+        return self.n_digit
 
     @property
     def codebook_sizes(self):
@@ -355,15 +416,21 @@ class EncoderDecoderTokenizerMixin:
         for item in example['item_seq'][:-1][-max_item_seq_len:]:
             input_ids.extend(self._token_single_item(item))
         input_ids.append(self.eos_token)
+        actual_input_length = len(input_ids)
         input_ids.extend([self.padding_token] * (self.max_token_seq_len - len(input_ids)))
 
         # attention_mask
-        item_seq_len = min(len(example['item_seq'][:-1]), max_item_seq_len)
-        attention_mask = [1] * (self.n_digit * item_seq_len + 2)
+        if self.variable_length_sids:
+            attention_mask = [1] * actual_input_length
+        else:
+            item_seq_len = min(len(example['item_seq'][:-1]), max_item_seq_len)
+            attention_mask = [1] * (self.n_digit * item_seq_len + 2)
         attention_mask.extend([0] * (self.max_token_seq_len - len(attention_mask)))
 
         # labels
         labels = list(self._token_single_item(example['item_seq'][-1])) + [self.eos_token]
+        if self.variable_length_sids:
+            labels.extend([self.ignored_label] * (self.n_digit + 1 - len(labels)))
 
         return input_ids, attention_mask, labels
 

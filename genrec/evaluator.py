@@ -17,7 +17,27 @@ class Evaluator:
             self.legal_preds.add(tokens)
 
         self.eos_token = self.tokenizer.eos_token
+        self.variable_length_sids = bool(getattr(self.tokenizer, "variable_length_sids", False))
         self.maxk = max(config['topk'])
+
+    def calculate_variable_pos_index(self, preds, pred_lengths, labels):
+        preds = preds.detach().cpu()
+        pred_lengths = pred_lengths.detach().cpu()
+        labels = labels.detach().cpu()
+        pos_index = torch.zeros((preds.shape[0], preds.shape[1]), dtype=torch.bool)
+
+        for batch_idx in range(preds.shape[0]):
+            target = []
+            for token in labels[batch_idx].tolist():
+                if token in {self.eos_token, self.tokenizer.ignored_label, self.tokenizer.padding_token}:
+                    break
+                target.append(int(token))
+            target = tuple(target)
+            for beam_idx in range(preds.shape[1]):
+                length = int(pred_lengths[batch_idx, beam_idx])
+                candidate = tuple(preds[batch_idx, beam_idx, :length].tolist())
+                pos_index[batch_idx, beam_idx] = candidate == target
+        return pos_index
 
     def calculate_pos_index(self, preds, labels):
         preds = preds.detach().cpu()    # [B, K, C]
@@ -65,7 +85,7 @@ class Evaluator:
         dcg = torch.where(pos_index, dcg, 0)
         return dcg[:, :k].sum(dim=1).cpu().float()
 
-    def err_at_k(self, preds, k):
+    def err_at_k(self, preds, k, pred_lengths=None):
         """
         Calculate the percentage illegal predictions
         among the top k generated token sequences.
@@ -74,7 +94,11 @@ class Evaluator:
         for i in range(preds.shape[0]):
             n_illegal_preds = 0
             for j in range(k):
-                cur_pred = tuple(preds[i, j].tolist())
+                if pred_lengths is None:
+                    cur_pred = tuple(preds[i, j].tolist())
+                else:
+                    length = int(pred_lengths[i, j])
+                    cur_pred = tuple(preds[i, j, :length].tolist())
                 if cur_pred not in self.legal_preds:
                     n_illegal_preds += 1
             ret.append(n_illegal_preds / k)
@@ -82,11 +106,20 @@ class Evaluator:
 
     def calculate_metrics(self, preds, labels):        
         results = {}
-        if 'collision_cnts' in preds and preds['collision_cnts'].max() > 1:
+        if self.variable_length_sids:
+            pos_index = self.calculate_variable_pos_index(
+                preds['preds'], preds['pred_lengths'], labels
+            )
+        elif 'collision_cnts' in preds and preds['collision_cnts'].max() > 1:
             pos_index = self.calculate_pos_index_with_collisions(preds['preds'], labels, preds['collision_cnts'])
         else:
             pos_index = self.calculate_pos_index(preds['preds'], labels)
         for metric in self.config['metrics']:
             for k in self.config['topk']:
-                results[f"{metric}@{k}"] = self.metric2func[metric](pos_index, k)
+                if metric == 'err' and self.variable_length_sids:
+                    results[f"{metric}@{k}"] = self.err_at_k(
+                        preds['preds'], k, preds['pred_lengths']
+                    )
+                else:
+                    results[f"{metric}@{k}"] = self.metric2func[metric](pos_index, k)
         return results

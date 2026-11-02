@@ -11,18 +11,10 @@ Methods:
   - recursive_leiden: top-down recursive Leiden community detection splits.
   - recursive_dmon: top-down recursive local DMoN-style modularity splits.
 
-For recursive spectral, graph-embedding KMeans, and DMoN methods, hierarchy is controlled by:
-  --recursive_factor F
-  --recursive_levels L
-
-This creates coarse-to-fine partitions with target cluster counts roughly:
-  level_1: F
-  level_2: F^2
-  ...
-  level_L: F^L
-
-Each parent cluster is split into up to F child clusters. Small parents with fewer
-than F nodes are split into singleton-like clusters as needed.
+For recursive spectral and DMoN, --recursive_factor is the maximum child count.
+The local count is selected by the largest normalized-Laplacian eigengap, and
+branches stop when they no longer split. Graph-embedding KMeans retains its
+fixed factor and level behavior.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
 from a log-spaced scan. The number of children and hierarchy depth are determined
@@ -342,8 +334,11 @@ def save_outputs(
                 "cluster_counts_coarse_to_fine": [int(len(np.unique(x[x >= 0]))) for x in graph_labels_coarse_to_fine],
             }
         )
-        if args.method == "recursive_leiden":
+        if args.method in {"recursive_leiden", "recursive_spectral", "recursive_dmon"}:
             metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
+            if args.method in {"recursive_spectral", "recursive_dmon"}:
+                metadata["recursive_factor_max"] = int(args.recursive_factor)
+                metadata["recursive_branch_selection"] = "normalized_laplacian_largest_eigengap"
         else:
             metadata["recursive_factor"] = int(args.recursive_factor)
             metadata["recursive_levels"] = int(args.recursive_levels)
@@ -557,6 +552,36 @@ def spectral_cluster_subset(
 
     labels = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(Z)
     return labels.astype(np.int64)
+
+
+def adaptive_branch_count(A: sp.csr_matrix, subset: np.ndarray, max_branches: int) -> int:
+    """Choose a local branch count from the largest normalized-Laplacian eigengap."""
+    n = int(len(subset))
+    if n <= 1:
+        return 1
+    upper = min(int(max_branches), n - 1)
+    if upper <= 1:
+        return 1
+    A_sub = A[subset][:, subset].astype(np.float64).tocsr()
+    if A_sub.nnz == 0:
+        return 1
+    degree = np.asarray(A_sub.sum(axis=1)).reshape(-1)
+    inv_sqrt = 1.0 / np.sqrt(np.maximum(degree, 1e-12))
+    laplacian = sp.eye(n, format="csr") - sp.diags(inv_sqrt) @ A_sub @ sp.diags(inv_sqrt)
+    try:
+        if n <= upper + 1:
+            values = np.linalg.eigvalsh(laplacian.toarray())
+        else:
+            # Candidate k is the number of eigenvalues before the gap, so one
+            # extra eigenvalue is needed to assess every k through `upper`.
+            values = eigsh(laplacian, k=upper + 1, which="SM", return_eigenvectors=False)
+        values = np.sort(values)
+        gaps = np.diff(values)[:upper]
+        if gaps.size:
+            return int(np.argmax(gaps)) + 1
+    except Exception as error:
+        print(f"[warn] adaptive eigengap failed for subset size={n}: {error}. Keeping one branch.")
+    return 1
 
 
 def embedding_cluster_subset(
@@ -897,7 +922,8 @@ def recursive_hierarchy(
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
-    if levels < 1:
+    adaptive_depth = method in {"recursive_spectral", "recursive_dmon"}
+    if not adaptive_depth and levels < 1:
         raise ValueError("--recursive_levels must be >= 1")
 
     n = x.size(0)
@@ -944,50 +970,68 @@ def recursive_hierarchy(
     parent_labels = np.zeros(n, dtype=np.int64)
     hierarchy: List[np.ndarray] = []
     history: List[Dict[str, float]] = []
+    active_parents = {0}
 
     rng_seed = int(args.seed)
 
-    for level in range(1, levels + 1):
+    level = 1
+    while adaptive_depth or level <= levels:
         new_labels = np.full(n, -1, dtype=np.int64)
         next_cluster_id = 0
         parents = [p for p in np.unique(parent_labels).tolist() if p >= 0]
+        next_active_parents = set()
+        any_split = False
 
         for parent in parents:
             subset = np.where(parent_labels == parent)[0].astype(np.int64)
-            k = min(factor, len(subset))
-
-            if method == "recursive_spectral":
-                local = spectral_cluster_subset(
-                    A=A,
-                    A_embedding=A_embedding,
-                    fusion_alpha=args.spectral_fusion_alpha,
-                    subset=subset,
-                    k=k,
-                    seed=rng_seed + level * 1009 + int(parent),
-                )
-                local_history = []
-            elif method == "recursive_kmeans":
-                local = embedding_cluster_subset(
-                    graph_embeddings=graph_embeddings,
-                    subset=subset,
-                    k=k,
-                    seed=rng_seed + level * 1009 + int(parent),
-                )
+            if parent not in active_parents:
+                local = np.zeros(len(subset), dtype=np.int64)
                 local_history = []
             else:
-                local, local_history = neural_cluster_subset(
-                    method=method,
-                    x_all=x,
-                    A=A,
-                    subset=subset,
-                    k=k,
-                    args=args,
-                    device=device,
+                k = (
+                    adaptive_branch_count(A, subset, factor)
+                    if method in {"recursive_spectral", "recursive_dmon"}
+                    else min(factor, len(subset))
                 )
 
-            for local_id in sorted(np.unique(local).tolist()):
+                if method == "recursive_spectral":
+                    local = spectral_cluster_subset(
+                        A=A,
+                        A_embedding=A_embedding,
+                        fusion_alpha=args.spectral_fusion_alpha,
+                        subset=subset,
+                        k=k,
+                        seed=rng_seed + level * 1009 + int(parent),
+                    )
+                    local_history = []
+                elif method == "recursive_kmeans":
+                    local = embedding_cluster_subset(
+                        graph_embeddings=graph_embeddings,
+                        subset=subset,
+                        k=k,
+                        seed=rng_seed + level * 1009 + int(parent),
+                    )
+                    local_history = []
+                else:
+                    local, local_history = neural_cluster_subset(
+                        method=method,
+                        x_all=x,
+                        A=A,
+                        subset=subset,
+                        k=k,
+                        args=args,
+                        device=device,
+                    )
+
+            local_ids = sorted(np.unique(local).tolist())
+            parent_split = len(local_ids) > 1
+            any_split = any_split or parent_split
+
+            for local_id in local_ids:
                 mask = local == local_id
                 new_labels[subset[mask]] = next_cluster_id
+                if parent_split and int(mask.sum()) > 1:
+                    next_active_parents.add(next_cluster_id)
                 next_cluster_id += 1
 
             for row in local_history:
@@ -997,9 +1041,16 @@ def recursive_hierarchy(
                 history.append(row)
 
         new_labels = relabel_compact(new_labels)
+        if not any_split:
+            if not hierarchy:
+                hierarchy.append(new_labels)
+                print(f"{method} stopped at root: clusters=1")
+            break
         hierarchy.append(new_labels)
-        parent_labels = new_labels
         print(f"recursive level {level}: clusters={len(np.unique(new_labels[new_labels >= 0]))}")
+        parent_labels = new_labels
+        active_parents = next_active_parents
+        level += 1
 
     return hierarchy, history
 
@@ -1371,8 +1422,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Recursive hierarchy.
-    parser.add_argument("--recursive_factor", type=int, default=4)
-    parser.add_argument("--recursive_levels", type=int, default=2)
+    parser.add_argument("--recursive_factor", type=int, default=4, help="Maximum child clusters per parent for recursive methods.")
+    parser.add_argument("--recursive_levels", type=int, default=2, help="Maximum depth for recursive_kmeans; adaptive spectral and DMoN run until no active branch splits.")
     parser.add_argument("--recursive_epochs", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
