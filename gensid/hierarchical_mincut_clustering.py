@@ -12,9 +12,10 @@ Methods:
   - recursive_dmon: top-down recursive local DMoN-style modularity splits.
 
 For recursive spectral and DMoN, --recursive_factor is the maximum child count.
-The local count is selected by the largest normalized-Laplacian eigengap, and
-branches stop when they no longer split. Graph-embedding KMeans retains its
-fixed factor and level behavior.
+The local count is proposed by the largest normalized-Laplacian eigengap for
+k >= 2, then accepted only when the resulting partition has sufficient local
+weighted-modularity gain. Branches stop when the proposal is rejected.
+Graph-embedding KMeans retains its fixed factor and level behavior.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
 from a log-spaced scan. The number of children and hierarchy depth are determined
@@ -338,7 +339,10 @@ def save_outputs(
             metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
             if args.method in {"recursive_spectral", "recursive_dmon"}:
                 metadata["recursive_factor_max"] = int(args.recursive_factor)
-                metadata["recursive_branch_selection"] = "normalized_laplacian_largest_eigengap"
+                metadata["recursive_branch_selection"] = (
+                    "normalized_laplacian_largest_nontrivial_eigengap_then_local_modularity_gain"
+                )
+                metadata["recursive_min_modularity_gain"] = float(args.recursive_min_modularity_gain)
         else:
             metadata["recursive_factor"] = int(args.recursive_factor)
             metadata["recursive_levels"] = int(args.recursive_levels)
@@ -560,7 +564,7 @@ def adaptive_branch_count(
     max_branches: int,
     context: str = "adaptive split",
 ) -> int:
-    """Choose a local branch count from the largest normalized-Laplacian eigengap."""
+    """Propose k >= 2 from the largest nontrivial normalized-Laplacian eigengap."""
     n = int(len(subset))
     if n <= 1:
         print(f"  {context}: nodes={n}, selected k=1 (singleton)", flush=True)
@@ -595,9 +599,13 @@ def adaptive_branch_count(
                     f"eigengap={gap:.6g}",
                     flush=True,
                 )
-            selected_k = int(np.argmax(gaps)) + 1
+            nontrivial_gaps = gaps[1:]
+            if not nontrivial_gaps.size:
+                print(f"  {context}: no nontrivial k candidate; keeping one branch", flush=True)
+                return 1
+            selected_k = int(np.argmax(nontrivial_gaps)) + 2
             print(
-                f"  {context}: selected k={selected_k} "
+                f"  {context}: proposed k={selected_k} "
                 f"with eigengap={gaps[selected_k - 1]:.6g}",
                 flush=True,
             )
@@ -605,6 +613,29 @@ def adaptive_branch_count(
     except Exception as error:
         print(f"[warn] adaptive eigengap failed for subset size={n}: {error}. Keeping one branch.")
     return 1
+
+
+def local_weighted_modularity_gain(
+    A: sp.csr_matrix,
+    subset: np.ndarray,
+    labels: np.ndarray,
+) -> float:
+    """Return hard-partition modularity relative to the unsplit local graph."""
+    if len(subset) == 0 or len(np.unique(labels)) <= 1:
+        return 0.0
+    A_sub = A[subset][:, subset].astype(np.float64).tocsr()
+    degrees = np.asarray(A_sub.sum(axis=1)).reshape(-1)
+    m2 = float(degrees.sum())
+    if m2 <= 0.0:
+        return 0.0
+
+    modularity = 0.0
+    for cluster_id in np.unique(labels):
+        mask = labels == cluster_id
+        internal_weight = float(A_sub[mask][:, mask].sum())
+        degree_sum = float(degrees[mask].sum())
+        modularity += internal_weight / m2 - (degree_sum / m2) ** 2
+    return float(modularity)
 
 
 def embedding_cluster_subset(
@@ -1011,12 +1042,13 @@ def recursive_hierarchy(
                 local = np.zeros(len(subset), dtype=np.int64)
                 local_history = []
             else:
+                split_context = f"{method} level {level}, parent {parent}"
                 k = (
                     adaptive_branch_count(
                         A,
                         subset,
                         factor,
-                        context=f"{method} level {level}, parent {parent}",
+                        context=split_context,
                     )
                     if method in {"recursive_spectral", "recursive_dmon"}
                     else min(factor, len(subset))
@@ -1050,6 +1082,32 @@ def recursive_hierarchy(
                         args=args,
                         device=device,
                     )
+
+                if method in {"recursive_spectral", "recursive_dmon"} and k > 1:
+                    proposed_children = int(len(np.unique(local)))
+                    modularity_gain = local_weighted_modularity_gain(A, subset, local)
+                    split_accepted = (
+                        proposed_children > 1
+                        and modularity_gain > args.recursive_min_modularity_gain
+                    )
+                    print(
+                        f"  {split_context}: proposed_children={proposed_children}, "
+                        f"local_modularity_gain={modularity_gain:.6g}, "
+                        f"threshold={args.recursive_min_modularity_gain:.6g}, "
+                        f"split={'accepted' if split_accepted else 'rejected'}",
+                        flush=True,
+                    )
+                    local_history.append(
+                        {
+                            "proposed_k": float(k),
+                            "proposed_children": float(proposed_children),
+                            "modularity_gain": float(modularity_gain),
+                            "modularity_threshold": float(args.recursive_min_modularity_gain),
+                            "split_accepted": float(split_accepted),
+                        }
+                    )
+                    if not split_accepted:
+                        local = np.zeros(len(subset), dtype=np.int64)
 
             local_ids = sorted(np.unique(local).tolist())
             parent_split = len(local_ids) > 1
@@ -1453,6 +1511,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recursive_factor", type=int, default=4, help="Maximum child clusters per parent for recursive methods.")
     parser.add_argument("--recursive_levels", type=int, default=2, help="Maximum depth for recursive_kmeans; adaptive spectral and DMoN run until no active branch splits.")
     parser.add_argument("--recursive_epochs", type=int, default=100)
+    parser.add_argument(
+        "--recursive_min_modularity_gain",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum local weighted-modularity gain required to accept an adaptive "
+            "recursive_spectral or recursive_dmon split. The default requires positive gain."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--spectral_embedding_method",

@@ -70,6 +70,7 @@ SEEDS=(42 43 44)
 CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
 RECURSIVE_FACTOR="${RECURSIVE_FACTOR:-10}"
+RECURSIVE_MIN_MODULARITY_GAIN="${RECURSIVE_MIN_MODULARITY_GAIN:-0.0}"
 
 GENSID_DIR="./gensid"
 
@@ -181,6 +182,7 @@ for SEED in "${SEEDS[@]}"; do
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_ARGS+=(
       --recursive_factor "${RECURSIVE_FACTOR}"
+      --recursive_min_modularity_gain "${RECURSIVE_MIN_MODULARITY_GAIN}"
     )
   fi
 

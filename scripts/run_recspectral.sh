@@ -19,6 +19,7 @@ case "${SPECTRAL_EMBEDDING_METHOD}" in
 esac
 
 RECURSIVE_FACTOR="${RECURSIVE_FACTOR:-10}"
+RECURSIVE_MIN_MODULARITY_GAIN="${RECURSIVE_MIN_MODULARITY_GAIN:-0.0}"
 if [[ "${SPECTRAL_EMBEDDING_METHOD}" == "semantic" ]]; then
   DEFAULT_SPECTRAL_FUSION_ALPHA=0.5
 else
@@ -29,6 +30,7 @@ SPECTRAL_KNN="${SPECTRAL_KNN:-20}"
 
 RECSPECTRAL_CLUSTERING_ARGS=(
   --recursive_factor "${RECURSIVE_FACTOR}"
+  --recursive_min_modularity_gain "${RECURSIVE_MIN_MODULARITY_GAIN}"
   --spectral_embedding_method "${SPECTRAL_EMBEDDING_METHOD}"
   --spectral_fusion_alpha "${SPECTRAL_FUSION_ALPHA}"
   --spectral_knn "${SPECTRAL_KNN}"
