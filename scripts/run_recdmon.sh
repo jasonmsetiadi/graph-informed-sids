@@ -69,9 +69,23 @@ SEEDS=(42 43 44)
 
 CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
-RECURSIVE_FACTOR="${RECURSIVE_FACTOR:-10}"
+RECURSIVE_LEVELS="${RECURSIVE_LEVELS:-4}"
+RECURSIVE_MODE="${RECURSIVE_MODE:-adaptive}"
 RECURSIVE_MIN_MODULARITY_GAIN="${RECURSIVE_MIN_MODULARITY_GAIN:-0.0}"
 DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
+case "${RECURSIVE_MODE}" in
+  adaptive|fixed) ;;
+  *)
+    echo "Unsupported RECURSIVE_MODE='${RECURSIVE_MODE}'. Choose adaptive or fixed." >&2
+    exit 2
+    ;;
+esac
+if [[ "${RECURSIVE_MODE}" == "fixed" ]]; then
+  DEFAULT_RECURSIVE_FACTOR=6
+else
+  DEFAULT_RECURSIVE_FACTOR=10
+fi
+RECURSIVE_FACTOR="${RECURSIVE_FACTOR:-${DEFAULT_RECURSIVE_FACTOR}}"
 
 GENSID_DIR="./gensid"
 
@@ -137,6 +151,18 @@ for SEED in "${SEEDS[@]}"; do
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_LABEL=""
   fi
+  if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" || "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
+    if [[ "${RECURSIVE_MODE}" == "adaptive" ]]; then
+      MODE_LABEL="adaptive"
+    else
+      MODE_LABEL="fixed_f${RECURSIVE_FACTOR}_l${RECURSIVE_LEVELS}"
+    fi
+    if [[ -n "${CLUSTERING_LABEL}" ]]; then
+      CLUSTERING_LABEL="${CLUSTERING_LABEL}_${MODE_LABEL}"
+    else
+      CLUSTERING_LABEL="${MODE_LABEL}"
+    fi
+  fi
   if [[ -n "${CLUSTERING_LABEL}" ]]; then
     ALIAS="${METHOD_NAME}_${CLUSTERING_LABEL}_${DATASET}_seed${SEED}"
   else
@@ -166,12 +192,17 @@ for SEED in "${SEEDS[@]}"; do
   CLUSTERING_ARGS=(--method "${CLUSTERING_METHOD}")
   SID_INDEX_ARGS=()
   MAPPER_VARIABLE_LENGTH_ARG=""
-  case "${CLUSTERING_METHOD}" in
-    recursive_leiden|recursive_spectral|recursive_dmon|recursive_kmeans)
-      SID_INDEX_ARGS+=(--variable_length)
-      MAPPER_VARIABLE_LENGTH_ARG="--variable_length_sids"
-      ;;
-  esac
+  if [[ "${CLUSTERING_METHOD}" == "recursive_leiden" || "${RECURSIVE_MODE}" == "adaptive" && ( "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" || "${CLUSTERING_METHOD}" == "recursive_kmeans" ) ]]; then
+    SID_INDEX_ARGS+=(--variable_length)
+    MAPPER_VARIABLE_LENGTH_ARG="--variable_length_sids"
+  fi
+  if [[ "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" || "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
+    CLUSTERING_ARGS+=(
+      --recursive_mode "${RECURSIVE_MODE}"
+      --recursive_factor "${RECURSIVE_FACTOR}"
+      --recursive_levels "${RECURSIVE_LEVELS}"
+    )
+  fi
   if [[ "${CLUSTERING_METHOD}" == "stacked_dmon" ]]; then
     CLUSTERING_ARGS+=(--cluster_sizes "${CLUSTER_SIZES[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
@@ -182,7 +213,6 @@ for SEED in "${SEEDS[@]}"; do
     CLUSTERING_ARGS+=("${RECLEIDEN_CLUSTERING_ARGS[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_ARGS+=(
-      --recursive_factor "${RECURSIVE_FACTOR}"
       --recursive_min_modularity_gain "${RECURSIVE_MIN_MODULARITY_GAIN}"
       --dmon_selection_epochs "${DMON_SELECTION_EPOCHS}"
     )
