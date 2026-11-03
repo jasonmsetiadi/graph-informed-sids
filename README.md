@@ -80,7 +80,9 @@ RECURSIVE_MODE=fixed bash scripts/run_recdmon.sh
 The same `RECURSIVE_MODE` switch works with `run_recspectral.sh` and
 `run_reckmeans.sh`. Adaptive mode defaults to maximum factor 10; fixed mode
 defaults to factor 6 and depth 4. Recursive Leiden remains adaptive and
-variable-length.
+variable-length. Both fixed- and variable-length modes use the same
+catalog-trie-constrained TIGER beam-search decoder; fixed mode simply has
+equal-depth trie paths.
 The `ns4gc` backend is a local weighted variant rather than the standard unweighted
 PyAGC objective. It uses raw interaction edge weights in GCN propagation and the
 neighbor-consistency loss, falling back to unit weights only when weights are absent.

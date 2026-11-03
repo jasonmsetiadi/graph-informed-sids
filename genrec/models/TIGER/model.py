@@ -54,11 +54,10 @@ class TIGER(AbstractModel):
         )
 
         self.t5 = T5ForConditionalGeneration(config=t5config)
-        self.sid_trie = (
-            SemanticIDTrie(tokenizer.item2tokens.values())
-            if tokenizer.variable_length_sids
-            else None
-        )
+        # Use the same catalog-constrained decoder for fixed- and
+        # variable-length SIDs. In fixed mode every trie path has `n_digit`
+        # tokens; in variable mode terminal leaves may occur earlier.
+        self.sid_trie = SemanticIDTrie(tokenizer.item2tokens.values())
 
     @property
     def n_parameters(self) -> str:
@@ -106,17 +105,10 @@ class TIGER(AbstractModel):
         num_beams = self.config['num_beams']
         batch_size = batch['input_ids'].shape[0]
 
-        generation_kwargs = {}
-        if self.tokenizer.variable_length_sids:
-            def prefix_allowed_tokens_fn(batch_id, decoder_input_ids):
-                del batch_id
-                prefix = decoder_input_ids.tolist()[1:]  # remove decoder-start token
-                return self.sid_trie.allowed_tokens(prefix, self.tokenizer.eos_token)
-
-            generation_kwargs.update(
-                prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
-                early_stopping=True,
-            )
+        def prefix_allowed_tokens_fn(batch_id, decoder_input_ids):
+            del batch_id
+            prefix = decoder_input_ids.tolist()[1:]  # remove decoder-start token
+            return self.sid_trie.allowed_tokens(prefix, self.tokenizer.eos_token)
 
         with torch.no_grad():
             outputs = self.t5.generate(
@@ -128,7 +120,8 @@ class TIGER(AbstractModel):
                 return_dict_in_generate=True,
                 output_scores=True,
                 use_cache=True,
-                **generation_kwargs,
+                prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+                early_stopping=True,
             )
 
         # 1. Process Sequences

@@ -2,7 +2,7 @@ from collections import defaultdict
 
 
 class SemanticIDTrie:
-    """Prefix constraints and terminal states for variable-length catalog SIDs."""
+    """Prefix constraints and terminal states for catalog semantic IDs."""
 
     def __init__(self, sequences):
         self.children = defaultdict(set)
