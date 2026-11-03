@@ -71,6 +71,7 @@ CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
 RECURSIVE_FACTOR="${RECURSIVE_FACTOR:-10}"
 RECURSIVE_MIN_MODULARITY_GAIN="${RECURSIVE_MIN_MODULARITY_GAIN:-0.0}"
+DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
 
 GENSID_DIR="./gensid"
 
@@ -166,7 +167,7 @@ for SEED in "${SEEDS[@]}"; do
   SID_INDEX_ARGS=()
   MAPPER_VARIABLE_LENGTH_ARG=""
   case "${CLUSTERING_METHOD}" in
-    recursive_leiden|recursive_spectral|recursive_dmon)
+    recursive_leiden|recursive_spectral|recursive_dmon|recursive_kmeans)
       SID_INDEX_ARGS+=(--variable_length)
       MAPPER_VARIABLE_LENGTH_ARG="--variable_length_sids"
       ;;
@@ -183,6 +184,7 @@ for SEED in "${SEEDS[@]}"; do
     CLUSTERING_ARGS+=(
       --recursive_factor "${RECURSIVE_FACTOR}"
       --recursive_min_modularity_gain "${RECURSIVE_MIN_MODULARITY_GAIN}"
+      --dmon_selection_epochs "${DMON_SELECTION_EPOCHS}"
     )
   fi
 

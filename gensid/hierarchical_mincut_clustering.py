@@ -14,9 +14,11 @@ Methods:
 For recursive spectral and DMoN, --recursive_factor is the maximum child count.
 Spectral proposes k >= 2 from the largest normalized-Laplacian eigengap and
 validates the partition with local weighted modularity. DMoN trains every
-k >= 2 candidate and selects the partition with the highest local weighted
-modularity. Branches stop when the best proposal lacks sufficient gain.
-Graph-embedding KMeans retains its fixed factor and level behavior.
+k >= 2 candidate for a short screening budget, selects the highest local
+weighted modularity, and fully retrains only that k. Branches stop when the
+final proposal lacks sufficient gain.
+Graph-embedding KMeans sweeps k >= 2 and selects the best embedding-space
+silhouette score, without constructing an additional graph.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
 from a log-spaced scan. The number of children and hierarchy depth are determined
@@ -51,6 +53,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from torch_geometric.nn import GCNConv
 
 from graph_aware_sid.adjacency_fusion import build_embedding_knn_adj, fuse_adjacencies
@@ -336,7 +339,7 @@ def save_outputs(
                 "cluster_counts_coarse_to_fine": [int(len(np.unique(x[x >= 0]))) for x in graph_labels_coarse_to_fine],
             }
         )
-        if args.method in {"recursive_leiden", "recursive_spectral", "recursive_dmon"}:
+        if args.method in {"recursive_leiden", "recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
             metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
             if args.method in {"recursive_spectral", "recursive_dmon"}:
                 metadata["recursive_factor_max"] = int(args.recursive_factor)
@@ -346,6 +349,19 @@ def save_outputs(
                     else "dmon_candidate_sweep_highest_local_modularity_gain"
                 )
                 metadata["recursive_min_modularity_gain"] = float(args.recursive_min_modularity_gain)
+                if args.method == "recursive_dmon":
+                    metadata["dmon_selection_epochs"] = int(
+                        min(args.dmon_selection_epochs, args.recursive_epochs)
+                    )
+                    metadata["dmon_final_epochs"] = int(args.recursive_epochs)
+            elif args.method == "recursive_kmeans":
+                metadata["recursive_factor_max"] = int(args.recursive_factor)
+                metadata["recursive_branch_selection"] = "kmeans_candidate_sweep_highest_silhouette"
+                metadata["recursive_kmeans_min_silhouette"] = float(args.recursive_kmeans_min_silhouette)
+                metadata["recursive_kmeans_min_child_size"] = int(args.recursive_kmeans_min_child_size)
+                metadata["recursive_kmeans_silhouette_sample_size"] = int(
+                    args.recursive_kmeans_silhouette_sample_size
+                )
         else:
             metadata["recursive_factor"] = int(args.recursive_factor)
             metadata["recursive_levels"] = int(args.recursive_levels)
@@ -661,6 +677,137 @@ def embedding_cluster_subset(
     return labels.astype(np.int64)
 
 
+def sampled_silhouette_score(
+    features: np.ndarray,
+    labels: np.ndarray,
+    sample_size: int,
+    seed: int,
+) -> float:
+    """Compute deterministic, cluster-aware sampled Euclidean silhouette."""
+    n = int(len(labels))
+    if sample_size <= 0 or n <= sample_size:
+        return float(silhouette_score(features, labels, metric="euclidean"))
+
+    rng = np.random.default_rng(seed)
+    selected: List[int] = []
+    for cluster_id in np.unique(labels):
+        members = np.flatnonzero(labels == cluster_id)
+        keep = min(2, len(members))
+        selected.extend(rng.choice(members, size=keep, replace=False).tolist())
+
+    target_size = min(n, max(int(sample_size), len(selected)))
+    selected_set = set(selected)
+    if len(selected) < target_size:
+        remaining = np.asarray([idx for idx in range(n) if idx not in selected_set], dtype=np.int64)
+        selected.extend(
+            rng.choice(remaining, size=target_size - len(selected), replace=False).tolist()
+        )
+    sample_indices = np.asarray(sorted(selected), dtype=np.int64)
+    return float(
+        silhouette_score(
+            features[sample_indices],
+            labels[sample_indices],
+            metric="euclidean",
+        )
+    )
+
+
+def adaptive_kmeans_split(
+    graph_embeddings: np.ndarray,
+    subset: np.ndarray,
+    max_branches: int,
+    min_silhouette: float,
+    min_child_size: int,
+    silhouette_sample_size: int,
+    seed: int,
+    context: str,
+) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+    """Select k by embedding-space silhouette and reject weak local splits."""
+    n = int(len(subset))
+    if min_child_size < 1:
+        raise ValueError("--recursive_kmeans_min_child_size must be >= 1")
+    if silhouette_sample_size < 0:
+        raise ValueError("--recursive_kmeans_silhouette_sample_size must be >= 0")
+
+    upper = min(int(max_branches), n - 1, n // min_child_size)
+    if upper < 2:
+        print(f"  {context}: nodes={n}, no feasible K-means split candidate", flush=True)
+        return np.zeros(n, dtype=np.int64), []
+
+    features = graph_embeddings[subset]
+    candidates: List[Tuple[int, np.ndarray, float, int, int, bool]] = []
+    history: List[Dict[str, float]] = []
+    for k in range(2, upper + 1):
+        candidate_seed = seed + k * 100_003
+        labels = KMeans(n_clusters=k, random_state=candidate_seed, n_init=10).fit_predict(features)
+        labels = labels.astype(np.int64)
+        child_sizes = np.bincount(labels, minlength=k)
+        children = int(np.count_nonzero(child_sizes))
+        smallest_child = int(child_sizes.min())
+        valid = children == k and smallest_child >= min_child_size
+        score = -1.0
+        if valid:
+            try:
+                score = sampled_silhouette_score(
+                    features=features,
+                    labels=labels,
+                    sample_size=silhouette_sample_size,
+                    seed=candidate_seed,
+                )
+                if not np.isfinite(score):
+                    valid = False
+                    score = -1.0
+            except ValueError as error:
+                print(f"  {context}: silhouette failed for k={k}: {error}", flush=True)
+                valid = False
+        print(
+            f"  {context}: k={k}, children={children}, min_child_size={smallest_child}, "
+            f"silhouette={score:.6g}, valid={valid}",
+            flush=True,
+        )
+        history.append(
+            {
+                "candidate_k": float(k),
+                "candidate_children": float(children),
+                "candidate_min_child_size": float(smallest_child),
+                "candidate_silhouette": float(score),
+                "candidate_valid": float(valid),
+            }
+        )
+        candidates.append((k, labels, score, children, smallest_child, valid))
+
+    valid_candidates = [candidate for candidate in candidates if candidate[5]]
+    if not valid_candidates:
+        print(f"  {context}: all K-means candidates invalid; keeping one branch", flush=True)
+        return np.zeros(n, dtype=np.int64), history
+
+    selected_k, selected_labels, selected_score, selected_children, selected_min_child, _ = max(
+        valid_candidates,
+        key=lambda candidate: (candidate[2], -candidate[0]),
+    )
+    split_accepted = selected_score > min_silhouette
+    print(
+        f"  {context}: selected k={selected_k}, children={selected_children}, "
+        f"min_child_size={selected_min_child}, silhouette={selected_score:.6g}, "
+        f"threshold={min_silhouette:.6g}, "
+        f"split={'accepted' if split_accepted else 'rejected'}",
+        flush=True,
+    )
+    history.append(
+        {
+            "selected_k": float(selected_k),
+            "selected_children": float(selected_children),
+            "selected_min_child_size": float(selected_min_child),
+            "selected_silhouette": float(selected_score),
+            "silhouette_threshold": float(min_silhouette),
+            "split_accepted": float(split_accepted),
+        }
+    )
+    if not split_accepted:
+        return np.zeros(n, dtype=np.int64), history
+    return selected_labels, history
+
+
 # -----------------------------------------------------------------------------
 # Recursive Leiden clustering
 # -----------------------------------------------------------------------------
@@ -910,6 +1057,7 @@ def neural_cluster_subset(
     args: argparse.Namespace,
     device: torch.device,
     seed: int | None = None,
+    epochs: int | None = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     n = int(len(subset))
     if n == 0:
@@ -922,6 +1070,9 @@ def neural_cluster_subset(
         raise ValueError(
             f"Recursive {method} local subset has {n} nodes, above --max_dense_nodes={args.max_dense_nodes}."
         )
+    training_epochs = int(args.recursive_epochs if epochs is None else epochs)
+    if training_epochs < 1:
+        raise ValueError("Recursive DMoN training epochs must be >= 1")
 
     if seed is not None:
         torch.manual_seed(seed)
@@ -936,7 +1087,7 @@ def neural_cluster_subset(
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     history = []
 
-    for epoch in range(1, args.recursive_epochs + 1):
+    for epoch in range(1, training_epochs + 1):
         model.train()
         opt.zero_grad()
         logits = model(x_sub)
@@ -957,7 +1108,7 @@ def neural_cluster_subset(
             nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         opt.step()
 
-        if epoch == 1 or epoch == args.recursive_epochs:
+        if epoch == 1 or epoch == training_epochs:
             row = {"epoch": float(epoch), "loss": float(loss.item()), "subset_size": float(n), "k": float(k)}
             row.update({name: float(value.item()) for name, value in metrics.items()})
             history.append(row)
@@ -990,10 +1141,18 @@ def adaptive_dmon_split(
         print(f"  {context}: no positive internal edge weight; keeping one branch", flush=True)
         return np.zeros(n, dtype=np.int64), []
 
+    screening_epochs = min(int(args.dmon_selection_epochs), int(args.recursive_epochs))
+    if screening_epochs < 1:
+        raise ValueError("--dmon_selection_epochs must be >= 1")
+
     candidates: List[Tuple[int, np.ndarray, float, int]] = []
     history: List[Dict[str, float]] = []
     for k in range(2, upper + 1):
-        print(f"  {context}: training DMoN candidate k={k}", flush=True)
+        print(
+            f"  {context}: screening DMoN candidate k={k} "
+            f"for {screening_epochs} epochs",
+            flush=True,
+        )
         candidate_labels, candidate_history = neural_cluster_subset(
             method="recursive_dmon",
             x_all=x_all,
@@ -1003,7 +1162,10 @@ def adaptive_dmon_split(
             args=args,
             device=device,
             seed=seed + k * 100_003,
+            epochs=screening_epochs,
         )
+        for row in candidate_history:
+            row["selection_screening"] = 1.0
         history.extend(candidate_history)
         children = int(len(np.unique(candidate_labels)))
         gain = local_weighted_modularity_gain(A, subset, candidate_labels)
@@ -1029,13 +1191,56 @@ def adaptive_dmon_split(
         return np.zeros(n, dtype=np.int64), history
 
     # Exact score ties prefer the simpler partition with the smaller requested k.
-    selected_k, selected_labels, selected_gain, selected_children = max(
+    selected_k, screened_labels, screened_gain, screened_children = max(
         valid_candidates,
         key=lambda candidate: (candidate[2], -candidate[0]),
     )
-    split_accepted = selected_gain > args.recursive_min_modularity_gain
     print(
-        f"  {context}: selected k={selected_k}, children={selected_children}, "
+        f"  {context}: screening selected k={selected_k}, children={screened_children}, "
+        f"local_modularity_gain={screened_gain:.6g}",
+        flush=True,
+    )
+    history.append(
+        {
+            "screening_selected_k": float(selected_k),
+            "screening_selected_children": float(screened_children),
+            "screening_selected_modularity_gain": float(screened_gain),
+            "screening_epochs": float(screening_epochs),
+        }
+    )
+
+    selected_seed = seed + selected_k * 100_003
+    if screening_epochs < args.recursive_epochs:
+        print(
+            f"  {context}: retraining selected k={selected_k} "
+            f"for {args.recursive_epochs} epochs",
+            flush=True,
+        )
+        selected_labels, final_history = neural_cluster_subset(
+            method="recursive_dmon",
+            x_all=x_all,
+            A=A,
+            subset=subset,
+            k=selected_k,
+            args=args,
+            device=device,
+            seed=selected_seed,
+            epochs=args.recursive_epochs,
+        )
+        for row in final_history:
+            row["selection_screening"] = 0.0
+        history.extend(final_history)
+    else:
+        selected_labels = screened_labels
+
+    selected_children = int(len(np.unique(selected_labels)))
+    selected_gain = local_weighted_modularity_gain(A, subset, selected_labels)
+    split_accepted = (
+        selected_children > 1
+        and selected_gain > args.recursive_min_modularity_gain
+    )
+    print(
+        f"  {context}: final k={selected_k}, children={selected_children}, "
         f"local_modularity_gain={selected_gain:.6g}, "
         f"threshold={args.recursive_min_modularity_gain:.6g}, "
         f"split={'accepted' if split_accepted else 'rejected'}",
@@ -1072,7 +1277,7 @@ def recursive_hierarchy(
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
-    adaptive_depth = method in {"recursive_spectral", "recursive_dmon"}
+    adaptive_depth = method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}
     if not adaptive_depth and levels < 1:
         raise ValueError("--recursive_levels must be >= 1")
 
@@ -1146,8 +1351,6 @@ def recursive_hierarchy(
                         factor,
                         context=split_context,
                     )
-                elif method == "recursive_kmeans":
-                    k = min(factor, len(subset))
 
                 if method == "recursive_spectral":
                     local = spectral_cluster_subset(
@@ -1160,13 +1363,16 @@ def recursive_hierarchy(
                     )
                     local_history = []
                 elif method == "recursive_kmeans":
-                    local = embedding_cluster_subset(
+                    local, local_history = adaptive_kmeans_split(
                         graph_embeddings=graph_embeddings,
                         subset=subset,
-                        k=k,
+                        max_branches=factor,
+                        min_silhouette=args.recursive_kmeans_min_silhouette,
+                        min_child_size=args.recursive_kmeans_min_child_size,
+                        silhouette_sample_size=args.recursive_kmeans_silhouette_sample_size,
                         seed=rng_seed + level * 1009 + int(parent),
+                        context=split_context,
                     )
-                    local_history = []
                 elif method == "recursive_dmon":
                     local, local_history = adaptive_dmon_split(
                         x_all=x,
@@ -1607,8 +1813,19 @@ def parse_args() -> argparse.Namespace:
 
     # Recursive hierarchy.
     parser.add_argument("--recursive_factor", type=int, default=4, help="Maximum child clusters per parent for recursive methods.")
-    parser.add_argument("--recursive_levels", type=int, default=2, help="Maximum depth for recursive_kmeans; adaptive spectral and DMoN run until no active branch splits.")
+    parser.add_argument(
+        "--recursive_levels",
+        type=int,
+        default=2,
+        help="Legacy maximum depth for fixed recursive methods; adaptive methods stop naturally.",
+    )
     parser.add_argument("--recursive_epochs", type=int, default=100)
+    parser.add_argument(
+        "--dmon_selection_epochs",
+        type=int,
+        default=50,
+        help="Short training budget for each adaptive DMoN k candidate before retraining the winner.",
+    )
     parser.add_argument(
         "--recursive_min_modularity_gain",
         type=float,
@@ -1617,6 +1834,24 @@ def parse_args() -> argparse.Namespace:
             "Minimum local weighted-modularity gain required to accept an adaptive "
             "recursive_spectral or recursive_dmon split. The default requires positive gain."
         ),
+    )
+    parser.add_argument(
+        "--recursive_kmeans_min_silhouette",
+        type=float,
+        default=0.05,
+        help="Minimum best Euclidean silhouette required to accept an adaptive K-means split.",
+    )
+    parser.add_argument(
+        "--recursive_kmeans_min_child_size",
+        type=int,
+        default=2,
+        help="Minimum number of items required in every adaptive K-means child.",
+    )
+    parser.add_argument(
+        "--recursive_kmeans_silhouette_sample_size",
+        type=int,
+        default=2000,
+        help="Maximum items used for silhouette scoring per branch; zero scores the full branch.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
