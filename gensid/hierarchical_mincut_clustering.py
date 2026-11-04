@@ -1883,8 +1883,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recursive_kmeans_min_silhouette",
         type=float,
-        default=0.05,
-        help="Minimum best Euclidean silhouette required to accept an adaptive K-means split.",
+        default=0.0,
+        help="Adaptive K-means accepts a split only when its best Euclidean silhouette exceeds this value.",
     )
     parser.add_argument(
         "--recursive_kmeans_min_child_size",
