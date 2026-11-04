@@ -76,7 +76,8 @@ fi
 RECURSIVE_LEVELS="${RECURSIVE_LEVELS:-4}"
 RECURSIVE_BRANCH_MODE="${RECURSIVE_BRANCH_MODE:-adaptive}"
 RECURSIVE_DEPTH_MODE="${RECURSIVE_DEPTH_MODE:-adaptive}"
-RECURSIVE_MIN_MODULARITY_GAIN="${RECURSIVE_MIN_MODULARITY_GAIN:-0.0}"
+RECURSIVE_POPULARITY_EPSILON_BASE="${RECURSIVE_POPULARITY_EPSILON_BASE:-0.001}"
+RECURSIVE_POPULARITY_ALPHA="${RECURSIVE_POPULARITY_ALPHA:-0}"
 DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
 SKIP_N_LAST="${SKIP_N_LAST:-2}"
 case "${RECURSIVE_BRANCH_MODE}" in
@@ -180,6 +181,11 @@ for SEED in "${SEEDS[@]}"; do
       CLUSTERING_LABEL="${MODE_LABEL}"
     fi
   fi
+  if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" || "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_leiden" || "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
+    POPULARITY_BASE_LABEL="${RECURSIVE_POPULARITY_EPSILON_BASE//./p}"
+    POPULARITY_ALPHA_LABEL="${RECURSIVE_POPULARITY_ALPHA//./p}"
+    CLUSTERING_LABEL="${CLUSTERING_LABEL}_popb${POPULARITY_BASE_LABEL}_a${POPULARITY_ALPHA_LABEL}"
+  fi
   if [[ -n "${CLUSTERING_LABEL}" ]]; then
     ALIAS="${METHOD_NAME}_${CLUSTERING_LABEL}_${DATASET}_seed${SEED}"
   else
@@ -221,6 +227,12 @@ for SEED in "${SEEDS[@]}"; do
       --recursive_levels "${RECURSIVE_LEVELS}"
     )
   fi
+  if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" || "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_leiden" || "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
+    CLUSTERING_ARGS+=(
+      --recursive_popularity_epsilon_base "${RECURSIVE_POPULARITY_EPSILON_BASE}"
+      --recursive_popularity_alpha "${RECURSIVE_POPULARITY_ALPHA}"
+    )
+  fi
   if [[ "${CLUSTERING_METHOD}" == "stacked_dmon" ]]; then
     CLUSTERING_ARGS+=(--cluster_sizes "${CLUSTER_SIZES[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
@@ -231,7 +243,6 @@ for SEED in "${SEEDS[@]}"; do
     CLUSTERING_ARGS+=("${RECLEIDEN_CLUSTERING_ARGS[@]}")
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_ARGS+=(
-      --recursive_min_modularity_gain "${RECURSIVE_MIN_MODULARITY_GAIN}"
       --dmon_selection_epochs "${DMON_SELECTION_EPOCHS}"
     )
   fi

@@ -172,6 +172,70 @@ def edge_index_to_sparse_adj(
     return A
 
 
+def load_item_log_frequencies(
+    interactions_path: str,
+    item_ids: np.ndarray,
+    num_items: int,
+    skip_n_last: int | None,
+) -> np.ndarray:
+    """Return log training frequency in graph-node order."""
+    with open(interactions_path, "r") as f:
+        interactions = json.load(f)
+
+    frequencies = np.zeros(num_items, dtype=np.int64)
+    for items in interactions.values():
+        train_items = items if skip_n_last in (None, 0) else items[:-skip_n_last]
+        for item in train_items:
+            item_id = int(item)
+            if item_id < 0 or item_id >= num_items:
+                raise ValueError(
+                    f"Interaction item_id={item_id} is outside embeddings range [0, {num_items})"
+                )
+            frequencies[item_id] += 1
+
+    return np.log1p(frequencies[item_ids].astype(np.float64))
+
+
+def normalize_active_parent_popularity(
+    parent_labels: np.ndarray,
+    active_parents: set[int],
+    item_log_frequencies: np.ndarray | None,
+) -> Dict[int, float]:
+    """Min-max normalize active parents' mean log-frequency within one level."""
+    if item_log_frequencies is None:
+        return {}
+    active_parent_ids = [
+        parent
+        for parent in np.unique(parent_labels).tolist()
+        if parent >= 0 and parent in active_parents
+    ]
+    raw_popularity = {
+        parent: float(item_log_frequencies[parent_labels == parent].mean())
+        for parent in active_parent_ids
+    }
+    if not raw_popularity:
+        return {}
+    lower = min(raw_popularity.values())
+    upper = max(raw_popularity.values())
+    if upper == lower:
+        return {parent: 0.0 for parent in active_parent_ids}
+    return {
+        parent: (value - lower) / (upper - lower)
+        for parent, value in raw_popularity.items()
+    }
+
+
+def popularity_quality_threshold(
+    cluster_popularity: float | None,
+    args: argparse.Namespace,
+) -> float:
+    normalized_popularity = 0.0 if cluster_popularity is None else cluster_popularity
+    return float(
+        args.recursive_popularity_epsilon_base
+        + args.recursive_popularity_alpha * normalized_popularity
+    )
+
+
 # -----------------------------------------------------------------------------
 # Shared output helpers
 # -----------------------------------------------------------------------------
@@ -340,6 +404,13 @@ def save_outputs(
         metadata.update(
             {
                 "cluster_counts_coarse_to_fine": [int(len(np.unique(x[x >= 0]))) for x in graph_labels_coarse_to_fine],
+                "recursive_popularity_epsilon_base": float(
+                    args.recursive_popularity_epsilon_base
+                ),
+                "recursive_popularity_alpha": float(args.recursive_popularity_alpha),
+                "recursive_popularity_normalization": (
+                    "per_level_minmax_parent_mean_log_training_frequency"
+                ),
             }
         )
         if args.method == "recursive_leiden":
@@ -369,23 +440,14 @@ def save_outputs(
                     metadata["dmon_final_epochs"] = int(args.recursive_epochs)
             elif args.recursive_branch_mode == "adaptive" and args.method == "recursive_kmeans":
                 metadata["recursive_branch_selection"] = "kmeans_candidate_sweep_highest_silhouette"
-                metadata["recursive_kmeans_min_silhouette"] = float(args.recursive_kmeans_min_silhouette)
                 metadata["recursive_kmeans_min_child_size"] = int(args.recursive_kmeans_min_child_size)
                 metadata["recursive_kmeans_silhouette_sample_size"] = int(
                     args.recursive_kmeans_silhouette_sample_size
                 )
-            if args.recursive_depth_mode == "adaptive":
-                if args.method in {"recursive_spectral", "recursive_dmon"}:
-                    metadata["recursive_min_modularity_gain"] = float(
-                        args.recursive_min_modularity_gain
-                    )
-                elif args.method == "recursive_kmeans":
-                    metadata["recursive_kmeans_min_silhouette"] = float(
-                        args.recursive_kmeans_min_silhouette
-                    )
-                    metadata["recursive_kmeans_min_child_size"] = int(
-                        args.recursive_kmeans_min_child_size
-                    )
+            if args.recursive_depth_mode == "adaptive" and args.method == "recursive_kmeans":
+                metadata["recursive_kmeans_min_child_size"] = int(
+                    args.recursive_kmeans_min_child_size
+                )
         if args.method == "recursive_spectral":
             metadata.update(
                 {
@@ -742,6 +804,7 @@ def adaptive_kmeans_split(
     silhouette_sample_size: int,
     seed: int,
     context: str,
+    cluster_popularity: float | None = None,
     require_quality: bool = True,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Select k by embedding-space silhouette and reject weak local splits."""
@@ -811,6 +874,7 @@ def adaptive_kmeans_split(
     print(
         f"  {context}: selected k={selected_k}, children={selected_children}, "
         f"min_child_size={selected_min_child}, silhouette={selected_score:.6g}, "
+        f"popularity={0.0 if cluster_popularity is None else cluster_popularity:.6g}, "
         f"threshold={min_silhouette if require_quality else 'disabled'}, "
         f"split={'accepted' if split_accepted else 'rejected'}",
         flush=True,
@@ -821,6 +885,9 @@ def adaptive_kmeans_split(
             "selected_children": float(selected_children),
             "selected_min_child_size": float(selected_min_child),
             "selected_silhouette": float(selected_score),
+            "cluster_popularity": float(
+                0.0 if cluster_popularity is None else cluster_popularity
+            ),
             "silhouette_threshold": float(min_silhouette),
             "split_accepted": float(split_accepted),
         }
@@ -1150,6 +1217,7 @@ def adaptive_dmon_split(
     device: torch.device,
     seed: int,
     context: str,
+    cluster_popularity: float | None = None,
     require_quality: bool = True,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Select a local DMoN split by sweeping k and maximizing hard modularity."""
@@ -1258,14 +1326,20 @@ def adaptive_dmon_split(
 
     selected_children = int(len(np.unique(selected_labels)))
     selected_gain = local_weighted_modularity_gain(A, subset, selected_labels)
+    normalized_popularity = 0.0 if cluster_popularity is None else cluster_popularity
+    modularity_threshold = popularity_quality_threshold(
+        cluster_popularity,
+        args,
+    )
     split_accepted = (
         selected_children > 1
-        and (not require_quality or selected_gain > args.recursive_min_modularity_gain)
+        and (not require_quality or selected_gain > modularity_threshold)
     )
     print(
         f"  {context}: final k={selected_k}, children={selected_children}, "
         f"local_modularity_gain={selected_gain:.6g}, "
-        f"threshold={args.recursive_min_modularity_gain if require_quality else 'disabled'}, "
+        f"popularity={normalized_popularity:.6g}, "
+        f"threshold={modularity_threshold if require_quality else 'disabled'}, "
         f"split={'accepted' if split_accepted else 'rejected'}",
         flush=True,
     )
@@ -1274,7 +1348,8 @@ def adaptive_dmon_split(
             "selected_k": float(selected_k),
             "selected_children": float(selected_children),
             "modularity_gain": float(selected_gain),
-            "modularity_threshold": float(args.recursive_min_modularity_gain),
+            "cluster_popularity": float(normalized_popularity),
+            "modularity_threshold": float(modularity_threshold),
             "split_accepted": float(split_accepted),
         }
     )
@@ -1297,6 +1372,7 @@ def recursive_hierarchy(
     levels: int,
     args: argparse.Namespace,
     device: torch.device,
+    item_log_frequencies: np.ndarray | None = None,
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
@@ -1362,6 +1438,11 @@ def recursive_hierarchy(
         new_labels = np.full(n, -1, dtype=np.int64)
         next_cluster_id = 0
         parents = [p for p in np.unique(parent_labels).tolist() if p >= 0]
+        parent_popularity = normalize_active_parent_popularity(
+            parent_labels,
+            active_parents,
+            item_log_frequencies,
+        )
         next_active_parents = set()
         any_split = False
 
@@ -1400,15 +1481,21 @@ def recursive_hierarchy(
                     local_history = []
                 elif method == "recursive_kmeans":
                     if adaptive_branch:
+                        cluster_popularity = parent_popularity.get(parent)
+                        silhouette_threshold = popularity_quality_threshold(
+                            cluster_popularity,
+                            args,
+                        )
                         local, local_history = adaptive_kmeans_split(
                             graph_embeddings=graph_embeddings,
                             subset=subset,
                             max_branches=factor,
-                            min_silhouette=args.recursive_kmeans_min_silhouette,
+                            min_silhouette=silhouette_threshold,
                             min_child_size=args.recursive_kmeans_min_child_size,
                             silhouette_sample_size=args.recursive_kmeans_silhouette_sample_size,
                             seed=rng_seed + level * 1009 + int(parent),
                             context=split_context,
+                            cluster_popularity=cluster_popularity,
                             require_quality=adaptive_depth,
                         )
                     else:
@@ -1430,6 +1517,7 @@ def recursive_hierarchy(
                             device=device,
                             seed=rng_seed + level * 1009 + int(parent),
                             context=split_context,
+                            cluster_popularity=parent_popularity.get(parent),
                             require_quality=adaptive_depth,
                         )
                     else:
@@ -1469,11 +1557,20 @@ def recursive_hierarchy(
                                 flush=True,
                             )
                             valid = False
-                    split_accepted = valid and silhouette > args.recursive_kmeans_min_silhouette
+                    cluster_popularity = parent_popularity.get(parent)
+                    normalized_popularity = (
+                        0.0 if cluster_popularity is None else cluster_popularity
+                    )
+                    silhouette_threshold = popularity_quality_threshold(
+                        cluster_popularity,
+                        args,
+                    )
+                    split_accepted = valid and silhouette > silhouette_threshold
                     print(
                         f"  {split_context}: fixed k={k}, children={proposed_children}, "
                         f"min_child_size={smallest_child}, silhouette={silhouette:.6g}, "
-                        f"threshold={args.recursive_kmeans_min_silhouette:.6g}, "
+                        f"popularity={normalized_popularity:.6g}, "
+                        f"threshold={silhouette_threshold:.6g}, "
                         f"split={'accepted' if split_accepted else 'rejected'}",
                         flush=True,
                     )
@@ -1482,7 +1579,8 @@ def recursive_hierarchy(
                             "fixed_k": float(k),
                             "proposed_children": float(proposed_children),
                             "selected_silhouette": float(silhouette),
-                            "silhouette_threshold": float(args.recursive_kmeans_min_silhouette),
+                            "cluster_popularity": float(normalized_popularity),
+                            "silhouette_threshold": float(silhouette_threshold),
                             "split_accepted": float(split_accepted),
                         }
                     )
@@ -1492,14 +1590,23 @@ def recursive_hierarchy(
                 if adaptive_depth and not adaptive_branch and method == "recursive_dmon" and k > 1:
                     proposed_children = int(len(np.unique(local)))
                     modularity_gain = local_weighted_modularity_gain(A, subset, local)
+                    cluster_popularity = parent_popularity.get(parent)
+                    normalized_popularity = (
+                        0.0 if cluster_popularity is None else cluster_popularity
+                    )
+                    modularity_threshold = popularity_quality_threshold(
+                        cluster_popularity,
+                        args,
+                    )
                     split_accepted = (
                         proposed_children > 1
-                        and modularity_gain > args.recursive_min_modularity_gain
+                        and modularity_gain > modularity_threshold
                     )
                     print(
                         f"  {split_context}: fixed k={k}, children={proposed_children}, "
                         f"local_modularity_gain={modularity_gain:.6g}, "
-                        f"threshold={args.recursive_min_modularity_gain:.6g}, "
+                        f"popularity={normalized_popularity:.6g}, "
+                        f"threshold={modularity_threshold:.6g}, "
                         f"split={'accepted' if split_accepted else 'rejected'}",
                         flush=True,
                     )
@@ -1508,7 +1615,8 @@ def recursive_hierarchy(
                             "fixed_k": float(k),
                             "proposed_children": float(proposed_children),
                             "modularity_gain": float(modularity_gain),
-                            "modularity_threshold": float(args.recursive_min_modularity_gain),
+                            "cluster_popularity": float(normalized_popularity),
+                            "modularity_threshold": float(modularity_threshold),
                             "split_accepted": float(split_accepted),
                         }
                     )
@@ -1518,14 +1626,23 @@ def recursive_hierarchy(
                 if adaptive_depth and method == "recursive_spectral" and k > 1:
                     proposed_children = int(len(np.unique(local)))
                     modularity_gain = local_weighted_modularity_gain(A, subset, local)
+                    cluster_popularity = parent_popularity.get(parent)
+                    normalized_popularity = (
+                        0.0 if cluster_popularity is None else cluster_popularity
+                    )
+                    modularity_threshold = popularity_quality_threshold(
+                        cluster_popularity,
+                        args,
+                    )
                     split_accepted = (
                         proposed_children > 1
-                        and modularity_gain > args.recursive_min_modularity_gain
+                        and modularity_gain > modularity_threshold
                     )
                     print(
                         f"  {split_context}: proposed_children={proposed_children}, "
                         f"local_modularity_gain={modularity_gain:.6g}, "
-                        f"threshold={args.recursive_min_modularity_gain:.6g}, "
+                        f"popularity={normalized_popularity:.6g}, "
+                        f"threshold={modularity_threshold:.6g}, "
                         f"split={'accepted' if split_accepted else 'rejected'}",
                         flush=True,
                     )
@@ -1534,7 +1651,8 @@ def recursive_hierarchy(
                             "proposed_k": float(k),
                             "proposed_children": float(proposed_children),
                             "modularity_gain": float(modularity_gain),
-                            "modularity_threshold": float(args.recursive_min_modularity_gain),
+                            "cluster_popularity": float(normalized_popularity),
+                            "modularity_threshold": float(modularity_threshold),
                             "split_accepted": float(split_accepted),
                         }
                     )
@@ -1579,6 +1697,7 @@ def recursive_leiden_hierarchy(
     edge_weight: torch.Tensor | None,
     args: argparse.Namespace,
     device: torch.device,
+    item_log_frequencies: np.ndarray | None = None,
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     """Recursively split active Leiden communities until every branch stops naturally."""
     n = x.size(0)
@@ -1616,6 +1735,11 @@ def recursive_leiden_hierarchy(
         next_active_parents = set()
         next_cluster_id = 0
         any_split = False
+        parent_popularity = normalize_active_parent_popularity(
+            parent_labels,
+            active_parents,
+            item_log_frequencies,
+        )
 
         for parent in [p for p in np.unique(parent_labels).tolist() if p >= 0]:
             subset = np.where(parent_labels == parent)[0].astype(np.int64)
@@ -1637,6 +1761,38 @@ def recursive_leiden_hierarchy(
                     early_stop_patience=args.leiden_early_stop_patience,
                     n_iterations=args.leiden_iterations,
                 )
+                proposed_children = int(len(np.unique(local)))
+                if proposed_children > 1:
+                    modularity_gain = local_weighted_modularity_gain(A, subset, local)
+                    cluster_popularity = parent_popularity.get(parent)
+                    normalized_popularity = (
+                        0.0 if cluster_popularity is None else cluster_popularity
+                    )
+                    modularity_threshold = popularity_quality_threshold(
+                        cluster_popularity,
+                        args,
+                    )
+                    split_accepted = modularity_gain > modularity_threshold
+                    print(
+                        f"Leiden level {level}, parent {parent}: "
+                        f"children={proposed_children}, "
+                        f"local_modularity_gain={modularity_gain:.6g}, "
+                        f"popularity={normalized_popularity:.6g}, "
+                        f"threshold={modularity_threshold:.6g}, "
+                        f"split={'accepted' if split_accepted else 'rejected'}",
+                        flush=True,
+                    )
+                    local_history.append(
+                        {
+                            "proposed_children": float(proposed_children),
+                            "modularity_gain": float(modularity_gain),
+                            "cluster_popularity": float(normalized_popularity),
+                            "modularity_threshold": float(modularity_threshold),
+                            "split_accepted": float(split_accepted),
+                        }
+                    )
+                    if not split_accepted:
+                        local = np.zeros(len(subset), dtype=np.int64)
             else:
                 local = np.zeros(len(subset), dtype=np.int64)
                 local_history = []
@@ -1971,15 +2127,29 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help=(
-            "Minimum local weighted-modularity gain required to accept an adaptive "
-            "recursive_spectral or recursive_dmon split. The default requires positive gain."
+            "Deprecated compatibility option; use --recursive_popularity_epsilon_base."
+        ),
+    )
+    parser.add_argument(
+        "--recursive_popularity_epsilon_base",
+        type=float,
+        default=0.001,
+        help="Base quality threshold for popularity-aware recursive stopping.",
+    )
+    parser.add_argument(
+        "--recursive_popularity_alpha",
+        type=float,
+        default=0.0,
+        help=(
+            "Popularity coefficient in threshold = epsilon_base + alpha * per-level "
+            "min-max normalized parent mean log-frequency."
         ),
     )
     parser.add_argument(
         "--recursive_kmeans_min_silhouette",
         type=float,
         default=0.0,
-        help="Adaptive K-means accepts a split only when its best Euclidean silhouette exceeds this value.",
+        help="Deprecated compatibility option; use --recursive_popularity_epsilon_base.",
     )
     parser.add_argument(
         "--recursive_kmeans_min_child_size",
@@ -2177,6 +2347,30 @@ def main() -> None:
         skip_n_last=args.skip_n_last,
     )
     args.input_has_edge_weight = edge_weight is not None
+    item_log_frequencies = None
+    if args.recursive_popularity_alpha < 0.0:
+        raise ValueError("--recursive_popularity_alpha must be >= 0")
+    if args.recursive_popularity_epsilon_base < 0.0:
+        raise ValueError("--recursive_popularity_epsilon_base must be >= 0")
+    popularity_methods = {
+        "recursive_dmon",
+        "recursive_spectral",
+        "recursive_kmeans",
+        "recursive_leiden",
+    }
+    if args.method in popularity_methods:
+        item_log_frequencies = load_item_log_frequencies(
+            interactions_path=args.interactions_path,
+            item_ids=item_ids,
+            num_items=raw_embeddings.shape[0],
+            skip_n_last=args.skip_n_last,
+        )
+        print(
+            f"Popularity-aware {args.method} threshold: "
+            f"epsilon_base={args.recursive_popularity_epsilon_base}, "
+            f"alpha={args.recursive_popularity_alpha}, "
+            "normalization=per_level_minmax_parent_mean_log_frequency"
+        )
 
     print(f"Method: {args.method}")
     if args.method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
@@ -2196,6 +2390,7 @@ def main() -> None:
             edge_weight=edge_weight,
             args=args,
             device=device,
+            item_log_frequencies=item_log_frequencies,
         )
         artifacts = {}
     else:
@@ -2208,6 +2403,7 @@ def main() -> None:
             levels=args.recursive_levels,
             args=args,
             device=device,
+            item_log_frequencies=item_log_frequencies,
         )
         artifacts = {}
 
