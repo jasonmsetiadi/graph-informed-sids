@@ -78,6 +78,7 @@ RECURSIVE_BRANCH_MODE="${RECURSIVE_BRANCH_MODE:-adaptive}"
 RECURSIVE_DEPTH_MODE="${RECURSIVE_DEPTH_MODE:-adaptive}"
 RECURSIVE_MIN_MODULARITY_GAIN="${RECURSIVE_MIN_MODULARITY_GAIN:-0.0}"
 DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
+SKIP_N_LAST="${SKIP_N_LAST:-2}"
 case "${RECURSIVE_BRANCH_MODE}" in
   adaptive|fixed) ;;
   *)
@@ -244,6 +245,7 @@ for SEED in "${SEEDS[@]}"; do
       --embeddings_path "${DATA_PATH}" \
       "${CLUSTERING_ARGS[@]}" \
       --graph_type adjacent_cooc \
+      --skip_n_last "${SKIP_N_LAST}" \
       --lr 3e-4 \
       --assign_hidden_dim 256 \
       --dropout 0.0 \
@@ -262,6 +264,8 @@ for SEED in "${SEEDS[@]}"; do
       --output_file "${GENSID_CACHE_DIR}/${DATASET}/${DATASET}${INDEX_FILE}" \
       --label_group coarse_to_fine_item_labels \
       --unclustered_strategy special \
+      --interactions_path "${INTERACTIONS_PATH}" \
+      --popularity_skip_n_last "${SKIP_N_LAST}" \
       "${SID_INDEX_ARGS[@]}" \
       --append_unique_leaf
 

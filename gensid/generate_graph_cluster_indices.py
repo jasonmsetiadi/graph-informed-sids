@@ -309,6 +309,101 @@ def collision_stats(codes: dict[str, list[str]]) -> dict[str, Any]:
     }
 
 
+def load_interaction_frequencies(
+    interactions_path: str,
+    skip_n_last: int,
+) -> Counter:
+    """Count training interaction occurrences per item using the graph split policy."""
+    if skip_n_last < 0:
+        raise ValueError("--popularity_skip_n_last must be >= 0")
+    with open(interactions_path, "r") as f:
+        interactions = json.load(f)
+
+    frequencies: Counter = Counter()
+    for items in interactions.values():
+        train_items = items if skip_n_last == 0 else items[:-skip_n_last]
+        for item_id in train_items:
+            frequencies[str(int(item_id))] += 1
+    return frequencies
+
+
+def popularity_length_stats(
+    codes: dict[str, list[str]],
+    frequencies: Counter,
+    extreme_fraction: float,
+) -> dict[str, Any]:
+    """Match varlen_semantic_ids length/popularity statistic naming."""
+    if not 0.0 < extreme_fraction < 0.5:
+        raise ValueError("--popularity_extreme_fraction must be between 0 and 0.5")
+
+    item_ids = sorted(codes, key=lambda item_id: int(item_id))
+    lengths = np.asarray([len(codes[item_id]) for item_id in item_ids], dtype=np.int64)
+    popularity = np.asarray(
+        [int(frequencies.get(str(int(item_id)), 0)) for item_id in item_ids],
+        dtype=np.float64,
+    )
+
+    mean_uniform = float(lengths.mean()) if lengths.size else float("nan")
+    popularity_sum = float(popularity.sum())
+    mean_unigram = (
+        float(np.dot(lengths, popularity) / popularity_sum)
+        if popularity_sum > 0.0
+        else mean_uniform
+    )
+
+    grouped: dict[int, list[float]] = defaultdict(list)
+    for length, pop in zip(lengths.tolist(), popularity.tolist()):
+        grouped[int(length)].append(float(pop))
+
+    per_length = {}
+    for sid_length, values in sorted(grouped.items()):
+        array = np.asarray(values, dtype=np.float64)
+        per_length[str(sid_length)] = {
+            "count": int(array.size),
+            "pop_mean": float(array.mean()),
+            "pop_median": float(np.median(array)),
+            "pop_std": float(array.std(ddof=1)) if array.size > 1 else float("nan"),
+            "pop_min": float(array.min()),
+            "pop_max": float(array.max()),
+        }
+
+    if lengths.size > 1:
+        group_size = min(
+            lengths.size // 2,
+            max(1, int(np.ceil(lengths.size * extreme_fraction))),
+        )
+        numeric_item_ids = np.asarray([int(item_id) for item_id in item_ids], dtype=np.int64)
+        popularity_order = np.lexsort((numeric_item_ids, -popularity))
+        head_mask = np.zeros(lengths.size, dtype=bool)
+        tail_mask = np.zeros(lengths.size, dtype=bool)
+        head_mask[popularity_order[:group_size]] = True
+        tail_mask[popularity_order[-group_size:]] = True
+        middle_mask = ~(head_mask | tail_mask)
+        head_longtail = {
+            "mean_length_head": float(lengths[head_mask].mean()),
+            "mean_length_middle": (
+                float(lengths[middle_mask].mean()) if middle_mask.any() else float("nan")
+            ),
+            "mean_length_longtail": float(lengths[tail_mask].mean()),
+            "count_head": int(head_mask.sum()),
+            "count_middle": int(middle_mask.sum()),
+            "count_longtail": int(tail_mask.sum()),
+        }
+    else:
+        head_longtail = {}
+
+    return {
+        "length": {
+            "mean_uniform": mean_uniform,
+            "mean_unigram": mean_unigram,
+        },
+        "popularity_length": {
+            "pop_stats_by_length": per_length,
+        },
+        "head_longtail": head_longtail,
+    }
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Generate GR SID mapping directly from graph-cluster hierarchy labels.")
     p.add_argument("--labels_path", required=True, help="Path to clustering labels JSON.")
@@ -335,6 +430,23 @@ def parse_args():
     )
     p.add_argument("--unique_prefix", default="<z_{}>", help="Format for appended uniqueness token.")
     p.add_argument("--stats_file", default=None, help="Optional path to save stats JSON. Default: output_file + '.stats.json'.")
+    p.add_argument(
+        "--interactions_path",
+        default=None,
+        help="Optional user-to-item-sequence JSON used to summarize item frequency by SID length.",
+    )
+    p.add_argument(
+        "--popularity_skip_n_last",
+        type=int,
+        default=2,
+        help="Interactions excluded from the end of every user sequence when computing frequency.",
+    )
+    p.add_argument(
+        "--popularity_extreme_fraction",
+        type=float,
+        default=0.2,
+        help="Fraction assigned to each popularity extreme: top head and bottom long-tail.",
+    )
     return p.parse_args()
 
 
@@ -387,6 +499,16 @@ def main():
             },
         }
     )
+    if args.interactions_path is not None:
+        frequencies = load_interaction_frequencies(
+            interactions_path=args.interactions_path,
+            skip_n_last=args.popularity_skip_n_last,
+        )
+        stats.update(popularity_length_stats(
+            codes=codes,
+            frequencies=frequencies,
+            extreme_fraction=args.popularity_extreme_fraction,
+        ))
     sid_lengths = [len(tokens) for tokens in codes.values()]
     length_counts = Counter(sid_lengths)
     stats.update(
