@@ -20,8 +20,8 @@ final proposal lacks sufficient gain.
 Graph-embedding KMeans sweeps k >= 2 and selects the best embedding-space
 silhouette score, without constructing an additional graph.
 
-Set --recursive_mode fixed to restore fixed-factor clustering for exactly
---recursive_levels levels. The default adaptive mode stops branches naturally.
+Branch-count selection and hierarchy depth are controlled independently by
+--recursive_branch_mode and --recursive_depth_mode.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
 from a log-spaced scan. The number of children and hierarchy depth are determined
@@ -345,34 +345,47 @@ def save_outputs(
         if args.method == "recursive_leiden":
             metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
         elif args.method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
-            metadata["recursive_mode"] = args.recursive_mode
-            if args.recursive_mode == "fixed":
+            metadata["recursive_branch_mode"] = args.recursive_branch_mode
+            metadata["recursive_depth_mode"] = args.recursive_depth_mode
+            if args.recursive_branch_mode == "fixed":
                 metadata["recursive_factor"] = int(args.recursive_factor)
-                metadata["recursive_levels"] = int(args.recursive_levels)
-                metadata["recursive_branch_selection"] = "fixed_factor_and_depth"
-            elif args.method in {"recursive_spectral", "recursive_dmon"}:
-                metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
+                metadata["recursive_branch_selection"] = "fixed_factor"
+            else:
                 metadata["recursive_factor_max"] = int(args.recursive_factor)
+            if args.recursive_depth_mode == "fixed":
+                metadata["recursive_levels"] = int(args.recursive_levels)
+            else:
+                metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
+            if args.recursive_branch_mode == "adaptive" and args.method in {"recursive_spectral", "recursive_dmon"}:
                 metadata["recursive_branch_selection"] = (
-                    "normalized_laplacian_largest_nontrivial_eigengap_then_local_modularity_gain"
+                    "normalized_laplacian_largest_nontrivial_eigengap"
                     if args.method == "recursive_spectral"
-                    else "dmon_candidate_sweep_highest_local_modularity_gain"
+                    else "dmon_candidate_sweep_highest_local_modularity"
                 )
-                metadata["recursive_min_modularity_gain"] = float(args.recursive_min_modularity_gain)
                 if args.method == "recursive_dmon":
                     metadata["dmon_selection_epochs"] = int(
                         min(args.dmon_selection_epochs, args.recursive_epochs)
                     )
                     metadata["dmon_final_epochs"] = int(args.recursive_epochs)
-            elif args.method == "recursive_kmeans":
-                metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
-                metadata["recursive_factor_max"] = int(args.recursive_factor)
+            elif args.recursive_branch_mode == "adaptive" and args.method == "recursive_kmeans":
                 metadata["recursive_branch_selection"] = "kmeans_candidate_sweep_highest_silhouette"
                 metadata["recursive_kmeans_min_silhouette"] = float(args.recursive_kmeans_min_silhouette)
                 metadata["recursive_kmeans_min_child_size"] = int(args.recursive_kmeans_min_child_size)
                 metadata["recursive_kmeans_silhouette_sample_size"] = int(
                     args.recursive_kmeans_silhouette_sample_size
                 )
+            if args.recursive_depth_mode == "adaptive":
+                if args.method in {"recursive_spectral", "recursive_dmon"}:
+                    metadata["recursive_min_modularity_gain"] = float(
+                        args.recursive_min_modularity_gain
+                    )
+                elif args.method == "recursive_kmeans":
+                    metadata["recursive_kmeans_min_silhouette"] = float(
+                        args.recursive_kmeans_min_silhouette
+                    )
+                    metadata["recursive_kmeans_min_child_size"] = int(
+                        args.recursive_kmeans_min_child_size
+                    )
         if args.method == "recursive_spectral":
             metadata.update(
                 {
@@ -729,6 +742,7 @@ def adaptive_kmeans_split(
     silhouette_sample_size: int,
     seed: int,
     context: str,
+    require_quality: bool = True,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Select k by embedding-space silhouette and reject weak local splits."""
     n = int(len(subset))
@@ -793,11 +807,11 @@ def adaptive_kmeans_split(
         valid_candidates,
         key=lambda candidate: (candidate[2], -candidate[0]),
     )
-    split_accepted = selected_score > min_silhouette
+    split_accepted = not require_quality or selected_score > min_silhouette
     print(
         f"  {context}: selected k={selected_k}, children={selected_children}, "
         f"min_child_size={selected_min_child}, silhouette={selected_score:.6g}, "
-        f"threshold={min_silhouette:.6g}, "
+        f"threshold={min_silhouette if require_quality else 'disabled'}, "
         f"split={'accepted' if split_accepted else 'rejected'}",
         flush=True,
     )
@@ -1136,6 +1150,7 @@ def adaptive_dmon_split(
     device: torch.device,
     seed: int,
     context: str,
+    require_quality: bool = True,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Select a local DMoN split by sweeping k and maximizing hard modularity."""
     n = int(len(subset))
@@ -1245,12 +1260,12 @@ def adaptive_dmon_split(
     selected_gain = local_weighted_modularity_gain(A, subset, selected_labels)
     split_accepted = (
         selected_children > 1
-        and selected_gain > args.recursive_min_modularity_gain
+        and (not require_quality or selected_gain > args.recursive_min_modularity_gain)
     )
     print(
         f"  {context}: final k={selected_k}, children={selected_children}, "
         f"local_modularity_gain={selected_gain:.6g}, "
-        f"threshold={args.recursive_min_modularity_gain:.6g}, "
+        f"threshold={args.recursive_min_modularity_gain if require_quality else 'disabled'}, "
         f"split={'accepted' if split_accepted else 'rejected'}",
         flush=True,
     )
@@ -1285,8 +1300,8 @@ def recursive_hierarchy(
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
-    adaptive_mode = args.recursive_mode == "adaptive"
-    adaptive_depth = adaptive_mode and method in {
+    adaptive_branch = args.recursive_branch_mode == "adaptive"
+    adaptive_depth = args.recursive_depth_mode == "adaptive" and method in {
         "recursive_spectral",
         "recursive_dmon",
         "recursive_kmeans",
@@ -1357,7 +1372,7 @@ def recursive_hierarchy(
                 local_history = []
             else:
                 split_context = f"{method} level {level}, parent {parent}"
-                if not adaptive_mode:
+                if not adaptive_branch:
                     k = min(factor, len(subset))
                 elif method == "recursive_spectral":
                     k = adaptive_branch_count(
@@ -1366,6 +1381,12 @@ def recursive_hierarchy(
                         factor,
                         context=split_context,
                     )
+                    if not adaptive_depth and k <= 1 and len(subset) > 1:
+                        k = min(2, factor, len(subset))
+                        print(
+                            f"  {split_context}: fixed depth forces fallback k={k}",
+                            flush=True,
+                        )
 
                 if method == "recursive_spectral":
                     local = spectral_cluster_subset(
@@ -1378,7 +1399,7 @@ def recursive_hierarchy(
                     )
                     local_history = []
                 elif method == "recursive_kmeans":
-                    if adaptive_mode:
+                    if adaptive_branch:
                         local, local_history = adaptive_kmeans_split(
                             graph_embeddings=graph_embeddings,
                             subset=subset,
@@ -1388,6 +1409,7 @@ def recursive_hierarchy(
                             silhouette_sample_size=args.recursive_kmeans_silhouette_sample_size,
                             seed=rng_seed + level * 1009 + int(parent),
                             context=split_context,
+                            require_quality=adaptive_depth,
                         )
                     else:
                         local = embedding_cluster_subset(
@@ -1398,7 +1420,7 @@ def recursive_hierarchy(
                         )
                         local_history = []
                 elif method == "recursive_dmon":
-                    if adaptive_mode:
+                    if adaptive_branch:
                         local, local_history = adaptive_dmon_split(
                             x_all=x,
                             A=A,
@@ -1408,6 +1430,7 @@ def recursive_hierarchy(
                             device=device,
                             seed=rng_seed + level * 1009 + int(parent),
                             context=split_context,
+                            require_quality=adaptive_depth,
                         )
                     else:
                         local, local_history = neural_cluster_subset(
@@ -1423,7 +1446,76 @@ def recursive_hierarchy(
                 else:
                     raise ValueError(f"Unsupported recursive method: {method}")
 
-                if adaptive_mode and method == "recursive_spectral" and k > 1:
+                if adaptive_depth and not adaptive_branch and method == "recursive_kmeans" and k > 1:
+                    child_sizes = np.bincount(local, minlength=k)
+                    proposed_children = int(np.count_nonzero(child_sizes))
+                    smallest_child = int(child_sizes.min())
+                    valid = (
+                        proposed_children == k
+                        and smallest_child >= args.recursive_kmeans_min_child_size
+                    )
+                    silhouette = -1.0
+                    if valid:
+                        try:
+                            silhouette = sampled_silhouette_score(
+                                features=graph_embeddings[subset],
+                                labels=local,
+                                sample_size=args.recursive_kmeans_silhouette_sample_size,
+                                seed=rng_seed + level * 1009 + int(parent),
+                            )
+                        except ValueError as error:
+                            print(
+                                f"  {split_context}: silhouette failed: {error}",
+                                flush=True,
+                            )
+                            valid = False
+                    split_accepted = valid and silhouette > args.recursive_kmeans_min_silhouette
+                    print(
+                        f"  {split_context}: fixed k={k}, children={proposed_children}, "
+                        f"min_child_size={smallest_child}, silhouette={silhouette:.6g}, "
+                        f"threshold={args.recursive_kmeans_min_silhouette:.6g}, "
+                        f"split={'accepted' if split_accepted else 'rejected'}",
+                        flush=True,
+                    )
+                    local_history.append(
+                        {
+                            "fixed_k": float(k),
+                            "proposed_children": float(proposed_children),
+                            "selected_silhouette": float(silhouette),
+                            "silhouette_threshold": float(args.recursive_kmeans_min_silhouette),
+                            "split_accepted": float(split_accepted),
+                        }
+                    )
+                    if not split_accepted:
+                        local = np.zeros(len(subset), dtype=np.int64)
+
+                if adaptive_depth and not adaptive_branch and method == "recursive_dmon" and k > 1:
+                    proposed_children = int(len(np.unique(local)))
+                    modularity_gain = local_weighted_modularity_gain(A, subset, local)
+                    split_accepted = (
+                        proposed_children > 1
+                        and modularity_gain > args.recursive_min_modularity_gain
+                    )
+                    print(
+                        f"  {split_context}: fixed k={k}, children={proposed_children}, "
+                        f"local_modularity_gain={modularity_gain:.6g}, "
+                        f"threshold={args.recursive_min_modularity_gain:.6g}, "
+                        f"split={'accepted' if split_accepted else 'rejected'}",
+                        flush=True,
+                    )
+                    local_history.append(
+                        {
+                            "fixed_k": float(k),
+                            "proposed_children": float(proposed_children),
+                            "modularity_gain": float(modularity_gain),
+                            "modularity_threshold": float(args.recursive_min_modularity_gain),
+                            "split_accepted": float(split_accepted),
+                        }
+                    )
+                    if not split_accepted:
+                        local = np.zeros(len(subset), dtype=np.int64)
+
+                if adaptive_depth and method == "recursive_spectral" and k > 1:
                     proposed_children = int(len(np.unique(local)))
                     modularity_gain = local_weighted_modularity_gain(A, subset, local)
                     split_accepted = (
@@ -1467,7 +1559,7 @@ def recursive_hierarchy(
                 history.append(row)
 
         new_labels = relabel_compact(new_labels)
-        if adaptive_mode and not any_split:
+        if adaptive_depth and not any_split:
             if not hierarchy:
                 hierarchy.append(new_labels)
                 print(f"{method} stopped at root: clusters=1")
@@ -1849,13 +1941,16 @@ def parse_args() -> argparse.Namespace:
 
     # Recursive hierarchy.
     parser.add_argument(
-        "--recursive_mode",
+        "--recursive_branch_mode",
         choices=["adaptive", "fixed"],
         default="adaptive",
-        help=(
-            "Adaptive selects branch count and natural depth; fixed uses "
-            "--recursive_factor for exactly --recursive_levels levels."
-        ),
+        help="Select the child count adaptively or use --recursive_factor.",
+    )
+    parser.add_argument(
+        "--recursive_depth_mode",
+        choices=["adaptive", "fixed"],
+        default="adaptive",
+        help="Stop branches by split quality or run exactly --recursive_levels levels.",
     )
     parser.add_argument("--recursive_factor", type=int, default=4, help="Maximum child clusters per parent for recursive methods.")
     parser.add_argument(
@@ -2086,12 +2181,9 @@ def main() -> None:
     print(f"Method: {args.method}")
     if args.method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
         print(
-            f"Recursive mode: {args.recursive_mode}"
-            + (
-                f" (factor={args.recursive_factor}, levels={args.recursive_levels})"
-                if args.recursive_mode == "fixed"
-                else f" (max factor={args.recursive_factor}, natural depth)"
-            )
+            f"Recursive modes: branch={args.recursive_branch_mode}, "
+            f"depth={args.recursive_depth_mode}, factor={args.recursive_factor}, "
+            f"levels={args.recursive_levels}"
         )
     print(f"Loaded graph nodes used: {x_graph.size(0)}, edges used: {edge_index.size(1)}, emb dim: {x_graph.size(1)}")
 

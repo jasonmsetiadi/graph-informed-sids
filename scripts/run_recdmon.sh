@@ -69,18 +69,30 @@ SEEDS=(42 43 44)
 
 CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
 CLUSTER_SIZES=(216 36 6 1)
+if [[ -n "${RECURSIVE_MODE:-}" ]]; then
+  echo "RECURSIVE_MODE has been removed; set RECURSIVE_BRANCH_MODE and RECURSIVE_DEPTH_MODE." >&2
+  exit 2
+fi
 RECURSIVE_LEVELS="${RECURSIVE_LEVELS:-4}"
-RECURSIVE_MODE="${RECURSIVE_MODE:-adaptive}"
+RECURSIVE_BRANCH_MODE="${RECURSIVE_BRANCH_MODE:-adaptive}"
+RECURSIVE_DEPTH_MODE="${RECURSIVE_DEPTH_MODE:-adaptive}"
 RECURSIVE_MIN_MODULARITY_GAIN="${RECURSIVE_MIN_MODULARITY_GAIN:-0.0}"
 DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
-case "${RECURSIVE_MODE}" in
+case "${RECURSIVE_BRANCH_MODE}" in
   adaptive|fixed) ;;
   *)
-    echo "Unsupported RECURSIVE_MODE='${RECURSIVE_MODE}'. Choose adaptive or fixed." >&2
+    echo "Unsupported RECURSIVE_BRANCH_MODE='${RECURSIVE_BRANCH_MODE}'. Choose adaptive or fixed." >&2
     exit 2
     ;;
 esac
-if [[ "${RECURSIVE_MODE}" == "fixed" ]]; then
+case "${RECURSIVE_DEPTH_MODE}" in
+  adaptive|fixed) ;;
+  *)
+    echo "Unsupported RECURSIVE_DEPTH_MODE='${RECURSIVE_DEPTH_MODE}'. Choose adaptive or fixed." >&2
+    exit 2
+    ;;
+esac
+if [[ "${RECURSIVE_BRANCH_MODE}" == "fixed" ]]; then
   DEFAULT_RECURSIVE_FACTOR=6
 else
   DEFAULT_RECURSIVE_FACTOR=10
@@ -152,10 +164,14 @@ for SEED in "${SEEDS[@]}"; do
     CLUSTERING_LABEL=""
   fi
   if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" || "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
-    if [[ "${RECURSIVE_MODE}" == "adaptive" ]]; then
-      MODE_LABEL="adaptive"
+    MODE_LABEL="b${RECURSIVE_BRANCH_MODE}_d${RECURSIVE_DEPTH_MODE}"
+    if [[ "${RECURSIVE_BRANCH_MODE}" == "fixed" ]]; then
+      MODE_LABEL="${MODE_LABEL}_f${RECURSIVE_FACTOR}"
     else
-      MODE_LABEL="fixed_f${RECURSIVE_FACTOR}_l${RECURSIVE_LEVELS}"
+      MODE_LABEL="${MODE_LABEL}_max${RECURSIVE_FACTOR}"
+    fi
+    if [[ "${RECURSIVE_DEPTH_MODE}" == "fixed" ]]; then
+      MODE_LABEL="${MODE_LABEL}_l${RECURSIVE_LEVELS}"
     fi
     if [[ -n "${CLUSTERING_LABEL}" ]]; then
       CLUSTERING_LABEL="${CLUSTERING_LABEL}_${MODE_LABEL}"
@@ -192,13 +208,14 @@ for SEED in "${SEEDS[@]}"; do
   CLUSTERING_ARGS=(--method "${CLUSTERING_METHOD}")
   SID_INDEX_ARGS=()
   MAPPER_VARIABLE_LENGTH_ARG=""
-  if [[ "${CLUSTERING_METHOD}" == "recursive_leiden" || "${RECURSIVE_MODE}" == "adaptive" && ( "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" || "${CLUSTERING_METHOD}" == "recursive_kmeans" ) ]]; then
+  if [[ "${CLUSTERING_METHOD}" == "recursive_leiden" || "${RECURSIVE_DEPTH_MODE}" == "adaptive" && ( "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" || "${CLUSTERING_METHOD}" == "recursive_kmeans" ) ]]; then
     SID_INDEX_ARGS+=(--variable_length)
     MAPPER_VARIABLE_LENGTH_ARG="--variable_length_sids"
   fi
   if [[ "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" || "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
     CLUSTERING_ARGS+=(
-      --recursive_mode "${RECURSIVE_MODE}"
+      --recursive_branch_mode "${RECURSIVE_BRANCH_MODE}"
+      --recursive_depth_mode "${RECURSIVE_DEPTH_MODE}"
       --recursive_factor "${RECURSIVE_FACTOR}"
       --recursive_levels "${RECURSIVE_LEVELS}"
     )

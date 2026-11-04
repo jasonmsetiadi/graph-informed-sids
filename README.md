@@ -67,20 +67,31 @@ Embedding choices are `semantic`, `fastrp`, `s3gc`, `magi`, and `ns4gc`.
 For recursive K-means, `semantic` clusters the original item embeddings directly. For
 recursive spectral and Leiden, it converts those embeddings into a cosine kNN graph.
 All three recursive clustering runners default to `semantic`.
-Recursive DMoN, spectral, and K-means support two coupled hierarchy/SID modes:
+Recursive DMoN, spectral, and K-means control branch count and depth independently:
 
 ```shell
-# Adaptive branching and natural depth, with variable-length SIDs (default)
-RECURSIVE_MODE=adaptive bash scripts/run_recdmon.sh
+# Adaptive branching and adaptive depth (default; variable-length SIDs)
+RECURSIVE_BRANCH_MODE=adaptive RECURSIVE_DEPTH_MODE=adaptive \
+  bash scripts/run_recdmon.sh
 
-# Fixed branching and depth, with fixed-length SIDs
-RECURSIVE_MODE=fixed bash scripts/run_recdmon.sh
+# Fixed branching and fixed depth (fixed-length SIDs)
+RECURSIVE_BRANCH_MODE=fixed RECURSIVE_DEPTH_MODE=fixed \
+  bash scripts/run_recdmon.sh
+
+# Adaptive branching at exactly four levels (fixed-length SIDs)
+RECURSIVE_BRANCH_MODE=adaptive RECURSIVE_DEPTH_MODE=fixed \
+  bash scripts/run_recdmon.sh
+
+# Factor-six branching with natural stopping (variable-length SIDs)
+RECURSIVE_BRANCH_MODE=fixed RECURSIVE_DEPTH_MODE=adaptive \
+  bash scripts/run_recdmon.sh
 ```
 
-The same `RECURSIVE_MODE` switch works with `run_recspectral.sh` and
-`run_reckmeans.sh`. Adaptive mode defaults to maximum factor 10; fixed mode
-defaults to factor 6 and depth 4. Recursive Leiden remains adaptive and
-variable-length. Both fixed- and variable-length modes use the same
+The same controls work with `run_recspectral.sh` and `run_reckmeans.sh`.
+Adaptive branching defaults to maximum factor 10; fixed branching defaults to
+factor 6; fixed depth defaults to four levels. SID storage follows depth mode:
+adaptive depth is variable-length and fixed depth is fixed-length. Recursive
+Leiden remains adaptive and variable-length. Both SID modes use the same
 catalog-trie-constrained TIGER beam-search decoder; fixed mode simply has
 equal-depth trie paths.
 The `ns4gc` backend is a local weighted variant rather than the standard unweighted
