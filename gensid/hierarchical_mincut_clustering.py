@@ -172,13 +172,13 @@ def edge_index_to_sparse_adj(
     return A
 
 
-def load_item_log_frequencies(
+def load_item_frequencies(
     interactions_path: str,
     item_ids: np.ndarray,
     num_items: int,
     skip_n_last: int | None,
 ) -> np.ndarray:
-    """Return log training frequency in graph-node order."""
+    """Return raw training interaction counts in graph-node order."""
     with open(interactions_path, "r") as f:
         interactions = json.load(f)
 
@@ -193,7 +193,17 @@ def load_item_log_frequencies(
                 )
             frequencies[item_id] += 1
 
-    return np.log1p(frequencies[item_ids].astype(np.float64))
+    return frequencies[item_ids].astype(np.float64)
+
+
+def load_item_log_frequencies(
+    interactions_path: str,
+    item_ids: np.ndarray,
+    num_items: int,
+    skip_n_last: int | None,
+) -> np.ndarray:
+    """Return log training frequency in graph-node order."""
+    return np.log1p(load_item_frequencies(interactions_path, item_ids, num_items, skip_n_last))
 
 
 def normalize_active_parent_popularity(
@@ -413,6 +423,13 @@ def save_outputs(
                 ),
             }
         )
+        if args.method == "recursive_dmon":
+            metadata["dmon_popularity_balance_lambda"] = float(
+                args.dmon_popularity_balance_lambda
+            )
+            metadata["dmon_popularity_balance_weights"] = (
+                "parent_local_smoothed_training_interaction_counts_plus_one"
+            )
         if args.method == "recursive_leiden":
             metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
         elif args.method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
@@ -1112,6 +1129,8 @@ def dense_dmon_local_loss(
     logits: torch.Tensor,
     balance_weight: float = 1.0,
     entropy_weight: float = 0.01,
+    popularity_weights: torch.Tensor | None = None,
+    popularity_balance_lambda: float = 0.0,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     s = F.softmax(logits, dim=-1)  # [N, K]
     deg = adj.sum(dim=1)
@@ -1123,7 +1142,17 @@ def dense_dmon_local_loss(
     # Simple collapse/balance regularizer. Keeps clusters from all collapsing.
     p = s.mean(dim=0)
     k = s.size(1)
-    balance = ((p - 1.0 / k) ** 2).sum()
+    uniform_balance = ((p - 1.0 / k) ** 2).sum()
+    balance = uniform_balance
+    if popularity_balance_lambda > 0.0:
+        if popularity_weights is None:
+            raise ValueError("Popularity weights are required when popularity balance is enabled")
+        popularity_mass = s.t() @ popularity_weights
+        popularity_balance = ((popularity_mass - 1.0 / k) ** 2).sum()
+        balance = (
+            (1.0 - popularity_balance_lambda) * uniform_balance
+            + popularity_balance_lambda * popularity_balance
+        )
 
     # Positive entropy term encourages sharper assignments when minimized.
     entropy = -(s * torch.log(s.clamp_min(1e-12))).sum(dim=1).mean()
@@ -1147,6 +1176,7 @@ def neural_cluster_subset(
     device: torch.device,
     seed: int | None = None,
     epochs: int | None = None,
+    item_frequencies: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     n = int(len(subset))
     if n == 0:
@@ -1171,6 +1201,12 @@ def neural_cluster_subset(
     A_sub_np = A[subset][:, subset].astype(np.float32).toarray()
     x_sub = x_all[torch.as_tensor(subset, dtype=torch.long)].to(device)
     adj = torch.as_tensor(A_sub_np, dtype=torch.float32, device=device)
+    popularity_weights = None
+    if args.dmon_popularity_balance_lambda > 0.0:
+        if item_frequencies is None:
+            raise ValueError("Item frequencies are required for popularity-weighted DMoN balance")
+        local_counts = torch.as_tensor(item_frequencies[subset] + 1.0, dtype=torch.float32, device=device)
+        popularity_weights = local_counts / local_counts.sum().clamp_min(1e-12)
 
     model = LocalAssignNet(x_sub.size(1), args.assign_hidden_dim, k, args.dropout).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -1186,6 +1222,8 @@ def neural_cluster_subset(
                 logits=logits,
                 balance_weight=args.dmon_balance_weight,
                 entropy_weight=args.dmon_entropy_weight,
+                popularity_weights=popularity_weights,
+                popularity_balance_lambda=args.dmon_popularity_balance_lambda,
             )
         else:
             raise ValueError(f"Unknown neural recursive method: {method}")
@@ -1219,6 +1257,7 @@ def adaptive_dmon_split(
     context: str,
     cluster_popularity: float | None = None,
     require_quality: bool = True,
+    item_frequencies: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Select a local DMoN split by sweeping k and maximizing hard modularity."""
     n = int(len(subset))
@@ -1254,6 +1293,7 @@ def adaptive_dmon_split(
             device=device,
             seed=seed + k * 100_003,
             epochs=screening_epochs,
+            item_frequencies=item_frequencies,
         )
         for row in candidate_history:
             row["selection_screening"] = 1.0
@@ -1317,6 +1357,7 @@ def adaptive_dmon_split(
             device=device,
             seed=selected_seed,
             epochs=args.recursive_epochs,
+            item_frequencies=item_frequencies,
         )
         for row in final_history:
             row["selection_screening"] = 0.0
@@ -1373,6 +1414,7 @@ def recursive_hierarchy(
     args: argparse.Namespace,
     device: torch.device,
     item_log_frequencies: np.ndarray | None = None,
+    item_frequencies: np.ndarray | None = None,
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
@@ -1519,6 +1561,7 @@ def recursive_hierarchy(
                             context=split_context,
                             cluster_popularity=parent_popularity.get(parent),
                             require_quality=adaptive_depth,
+                            item_frequencies=item_frequencies,
                         )
                     else:
                         local, local_history = neural_cluster_subset(
@@ -1530,6 +1573,7 @@ def recursive_hierarchy(
                             args=args,
                             device=device,
                             seed=rng_seed + level * 1009 + int(parent),
+                            item_frequencies=item_frequencies,
                         )
                 else:
                     raise ValueError(f"Unsupported recursive method: {method}")
@@ -2313,6 +2357,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dmon_balance_weight", type=float, default=1.0)
     parser.add_argument("--dmon_entropy_weight", type=float, default=0.01)
+    parser.add_argument(
+        "--dmon_popularity_balance_lambda",
+        type=float,
+        default=0.0,
+        help="Blend popularity-weighted balance into recursive DMoN; 0 preserves current behavior.",
+    )
 
     # Neural settings.
     parser.add_argument("--hidden_dim", type=int, default=256)
@@ -2348,10 +2398,13 @@ def main() -> None:
     )
     args.input_has_edge_weight = edge_weight is not None
     item_log_frequencies = None
+    item_frequencies = None
     if args.recursive_popularity_alpha < 0.0:
         raise ValueError("--recursive_popularity_alpha must be >= 0")
     if args.recursive_popularity_epsilon_base < 0.0:
         raise ValueError("--recursive_popularity_epsilon_base must be >= 0")
+    if not 0.0 <= args.dmon_popularity_balance_lambda <= 1.0:
+        raise ValueError("--dmon_popularity_balance_lambda must be between 0 and 1")
     popularity_methods = {
         "recursive_dmon",
         "recursive_spectral",
@@ -2359,12 +2412,13 @@ def main() -> None:
         "recursive_leiden",
     }
     if args.method in popularity_methods:
-        item_log_frequencies = load_item_log_frequencies(
+        item_frequencies = load_item_frequencies(
             interactions_path=args.interactions_path,
             item_ids=item_ids,
             num_items=raw_embeddings.shape[0],
             skip_n_last=args.skip_n_last,
         )
+        item_log_frequencies = np.log1p(item_frequencies)
         print(
             f"Popularity-aware {args.method} threshold: "
             f"epsilon_base={args.recursive_popularity_epsilon_base}, "
@@ -2404,6 +2458,7 @@ def main() -> None:
             args=args,
             device=device,
             item_log_frequencies=item_log_frequencies,
+            item_frequencies=item_frequencies,
         )
         artifacts = {}
 
