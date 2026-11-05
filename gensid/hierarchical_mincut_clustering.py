@@ -57,7 +57,7 @@ import torch.nn.functional as F
 from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import APPNP, GCNConv
 
 from graph_aware_sid.adjacency_fusion import build_embedding_knn_adj, fuse_adjacencies
 from graph_aware_sid.fastrp import build_fastrp_embeddings
@@ -279,6 +279,14 @@ def graph_embedding_metadata(method: str, args: argparse.Namespace) -> Dict[str,
         return {
             "semantic_embedding_source": "input_item_embeddings",
             "semantic_uses_graph": False,
+        }
+    if method == "appnp":
+        return {
+            "appnp_num_prop": int(args.appnp_num_prop),
+            "appnp_alpha": float(args.appnp_alpha),
+            "appnp_uses_edge_weights": True,
+            "appnp_edge_weight_transform": "raw",
+            "appnp_unit_weight_fallback": bool(not args.input_has_edge_weight),
         }
     if method == "fastrp":
         return {
@@ -547,6 +555,17 @@ def build_selected_graph_embeddings(
     """Return semantic features or run a graph-aware embedding backend."""
     if method == "semantic":
         return x.detach().cpu().numpy().astype(np.float32, copy=False)
+    if method == "appnp":
+        if args.appnp_num_prop < 0:
+            raise ValueError("--appnp_num_prop must be >= 0")
+        if not 0.0 <= args.appnp_alpha <= 1.0:
+            raise ValueError("--appnp_alpha must be between 0 and 1")
+
+        propagation = APPNP(K=args.appnp_num_prop, alpha=args.appnp_alpha, cached=False)
+        propagation.eval()
+        with torch.no_grad():
+            propagated = propagation(x, edge_index, edge_weight)
+        return propagated.detach().cpu().numpy().astype(np.float32, copy=False)
     if method == "fastrp":
         return build_fastrp_embeddings(
             adjacency=A,
@@ -2232,11 +2251,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--graph_embedding_method",
-        choices=["semantic", "fastrp", "s3gc", "magi", "ns4gc"],
+        choices=["semantic", "appnp", "fastrp", "s3gc", "magi", "ns4gc"],
         default="semantic",
         help="Embedding source used by recursive_kmeans; semantic uses the input item embeddings directly.",
     )
-    parser.add_argument("--fastrp_dim", type=int, default=256)
+    parser.add_argument(
+        "--appnp_num_prop",
+        type=int,
+        default=1,
+        help="Number of APPNP propagation steps used to prepare recursive K-means embeddings.",
+    )
+    parser.add_argument(
+        "--appnp_alpha",
+        type=float,
+        default=0.5,
+        help="APPNP teleport probability used to prepare recursive K-means embeddings.",
+    )
+    parser.add_argument("--fastrp_dim", type=int, default=768)
     parser.add_argument("--fastrp_feature_weight", type=float, default=1.0)
     parser.add_argument(
         "--fastrp_iteration_weights",
@@ -2246,7 +2277,7 @@ def parse_args() -> argparse.Namespace:
         help="FastRP hop weights, including the initial projection at index zero.",
     )
     parser.add_argument("--fastrp_seed", type=int, default=42)
-    parser.add_argument("--s3gc_dim", type=int, default=256)
+    parser.add_argument("--s3gc_dim", type=int, default=768)
     parser.add_argument("--s3gc_epochs", type=int, default=200)
     parser.add_argument("--s3gc_batch_size", type=int, default=4096)
     parser.add_argument("--s3gc_lr", type=float, default=0.01)
@@ -2264,7 +2295,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--s3gc_seed", type=int, default=42)
     parser.add_argument("--s3gc_print_every", type=int, default=10)
-    parser.add_argument("--magi_dim", type=int, default=256)
+    parser.add_argument("--magi_dim", type=int, default=768)
     parser.add_argument("--magi_num_layers", type=int, default=2)
     parser.add_argument("--magi_epochs", type=int, default=200)
     parser.add_argument("--magi_batch_size", type=int, default=512)
@@ -2278,7 +2309,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--magi_temperature", type=float, default=0.5)
     parser.add_argument("--magi_seed", type=int, default=42)
     parser.add_argument("--magi_print_every", type=int, default=10)
-    parser.add_argument("--ns4gc_dim", type=int, default=256)
+    parser.add_argument("--ns4gc_dim", type=int, default=768)
     parser.add_argument("--ns4gc_num_layers", type=int, default=2)
     parser.add_argument("--ns4gc_epochs", type=int, default=200)
     parser.add_argument("--ns4gc_batch_size", type=int, default=1024)

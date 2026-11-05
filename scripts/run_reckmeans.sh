@@ -10,10 +10,10 @@ GRAPH_EMBEDDING_METHOD="${1:-${GRAPH_EMBEDDING_METHOD:-semantic}}"
 METHOD_NAME="${METHOD_NAME:-RecKMeans_t5}"
 
 case "${GRAPH_EMBEDDING_METHOD}" in
-  semantic|fastrp|s3gc|magi|ns4gc) ;;
+  semantic|appnp|fastrp|s3gc|magi|ns4gc) ;;
   *)
     echo "Unsupported graph embedding method: ${GRAPH_EMBEDDING_METHOD}" >&2
-    echo "Choose semantic, fastrp, s3gc, magi, or ns4gc." >&2
+    echo "Choose semantic, appnp, fastrp, s3gc, magi, or ns4gc." >&2
     exit 2
     ;;
 esac

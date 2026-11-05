@@ -51,6 +51,7 @@ bash scripts/run_mmgrec.sh
 bash scripts/run_gae_components_ablation.sh          # TIGER, RQ-GAE, RQ-GAE w/o graph-loss, RQ-GAE w/o graph-input
 bash scripts/run_recdmon.sh
 bash scripts/run_reckmeans.sh semantic                # Recursive K-means over the original semantic embeddings
+bash scripts/run_reckmeans.sh appnp                   # Recursive K-means over APPNP-propagated semantic embeddings
 bash scripts/run_reckmeans.sh fastrp                 # Recursive K-means over FastRP embeddings
 bash scripts/run_recspectral.sh semantic             # Recursive spectral with semantic-embedding kNN fusion
 bash scripts/run_recspectral.sh fastrp               # Recursive spectral with FastRP-embedding kNN fusion
@@ -63,7 +64,12 @@ bash scripts/run_recspectral.sh ns4gc                # Local weighted NS4GC, sam
 NS4GC_TRAINING_MODE=full bash scripts/run_reckmeans.sh ns4gc  # Exact small-graph NS4GC
 ```
 
-Embedding choices are `semantic`, `fastrp`, `s3gc`, `magi`, and `ns4gc`.
+Recursive K-means embedding choices are `semantic`, `appnp`, `fastrp`, `s3gc`, `magi`, and `ns4gc`.
+APPNP defaults to the full RQ-GAE propagation settings (`APPNP_NUM_PROP=1`,
+`APPNP_ALPHA=0.5`) and uses graph edge weights when available.
+FastRP, S3GC, MAGI, and NS4GC default to 768 output dimensions to match the
+default `sentence-t5-base` semantic embeddings; their `*_DIM` variables remain configurable.
+Spectral and Leiden embedding choices are `semantic`, `fastrp`, `s3gc`, `magi`, and `ns4gc`.
 For recursive K-means, `semantic` clusters the original item embeddings directly. For
 recursive spectral and Leiden, it converts those embeddings into a cosine kNN graph.
 All three recursive clustering runners default to `semantic`.

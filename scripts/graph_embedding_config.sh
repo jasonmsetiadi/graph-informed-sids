@@ -6,8 +6,16 @@ configure_graph_embedding_args() {
   GRAPH_EMBEDDING_ARGS=()
 
   case "${embedding_method}" in
+    appnp)
+      APPNP_NUM_PROP="${APPNP_NUM_PROP:-1}"
+      APPNP_ALPHA="${APPNP_ALPHA:-0.5}"
+      GRAPH_EMBEDDING_ARGS=(
+        --appnp_num_prop "${APPNP_NUM_PROP}"
+        --appnp_alpha "${APPNP_ALPHA}"
+      )
+      ;;
     fastrp)
-      FASTRP_DIM="${FASTRP_DIM:-256}"
+      FASTRP_DIM="${FASTRP_DIM:-768}"
       FASTRP_FEATURE_WEIGHT="${FASTRP_FEATURE_WEIGHT:-1.0}"
       FASTRP_SEED="${FASTRP_SEED:-42}"
       if ! declare -p FASTRP_ITERATION_WEIGHTS >/dev/null 2>&1; then
@@ -21,7 +29,7 @@ configure_graph_embedding_args() {
       )
       ;;
     s3gc)
-      S3GC_DIM="${S3GC_DIM:-256}"
+      S3GC_DIM="${S3GC_DIM:-768}"
       S3GC_EPOCHS="${S3GC_EPOCHS:-200}"
       S3GC_BATCH_SIZE="${S3GC_BATCH_SIZE:-4096}"
       S3GC_LR="${S3GC_LR:-0.01}"
@@ -53,7 +61,7 @@ configure_graph_embedding_args() {
       )
       ;;
     magi)
-      MAGI_DIM="${MAGI_DIM:-256}"
+      MAGI_DIM="${MAGI_DIM:-768}"
       MAGI_NUM_LAYERS="${MAGI_NUM_LAYERS:-2}"
       MAGI_EPOCHS="${MAGI_EPOCHS:-200}"
       MAGI_BATCH_SIZE="${MAGI_BATCH_SIZE:-512}"
@@ -85,7 +93,7 @@ configure_graph_embedding_args() {
       )
       ;;
     ns4gc)
-      NS4GC_DIM="${NS4GC_DIM:-256}"
+      NS4GC_DIM="${NS4GC_DIM:-768}"
       NS4GC_NUM_LAYERS="${NS4GC_NUM_LAYERS:-2}"
       NS4GC_EPOCHS="${NS4GC_EPOCHS:-200}"
       NS4GC_BATCH_SIZE="${NS4GC_BATCH_SIZE:-1024}"

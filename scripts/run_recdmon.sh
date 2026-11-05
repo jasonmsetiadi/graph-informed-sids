@@ -150,7 +150,9 @@ for SEED in "${SEEDS[@]}"; do
   CLUSTERING_LABEL="${CLUSTERING_METHOD}"
   if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" ]]; then
     CLUSTERING_LABEL="${GRAPH_EMBEDDING_METHOD}"
-    if [[ "${GRAPH_EMBEDDING_METHOD}" == "ns4gc" ]]; then
+    if [[ "${GRAPH_EMBEDDING_METHOD}" == "appnp" ]]; then
+      CLUSTERING_LABEL="appnp_k${APPNP_NUM_PROP}_alpha${APPNP_ALPHA}"
+    elif [[ "${GRAPH_EMBEDDING_METHOD}" == "ns4gc" ]]; then
       CLUSTERING_LABEL="${CLUSTERING_LABEL}_${NS4GC_TRAINING_MODE}"
     fi
   elif [[ "${CLUSTERING_METHOD}" == "recursive_spectral" ]]; then
