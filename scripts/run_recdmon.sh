@@ -204,7 +204,14 @@ for SEED in "${SEEDS[@]}"; do
   MAP_ENV="logs/env/${ALIAS}_sid_mapping.env"
 
   LOG_FILE="logs/${ALIAS,,}.log"
-  RESULTS_DIR="results/${EXPERIMENT_ALIAS,,}"
+  case "${CLUSTERING_METHOD}" in
+    recursive_dmon|stacked_dmon) RESULTS_METHOD="dmon" ;;
+    recursive_spectral) RESULTS_METHOD="spectral" ;;
+    recursive_kmeans) RESULTS_METHOD="kmeans" ;;
+    recursive_leiden) RESULTS_METHOD="leiden" ;;
+    *) RESULTS_METHOD="${CLUSTERING_METHOD}" ;;
+  esac
+  RESULTS_DIR="results/${RESULTS_METHOD}/${EXPERIMENT_ALIAS,,}"
   FINAL_METRICS_FILE="${RESULTS_DIR}/seed${SEED}.metrics.json"
   SID_STATS_FILE="${RESULTS_DIR}/seed${SEED}.sid_stats.json"
   mkdir -p "${RESULTS_DIR}"
