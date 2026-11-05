@@ -187,10 +187,11 @@ for SEED in "${SEEDS[@]}"; do
     CLUSTERING_LABEL="${CLUSTERING_LABEL}_popb${POPULARITY_BASE_LABEL}_a${POPULARITY_ALPHA_LABEL}"
   fi
   if [[ -n "${CLUSTERING_LABEL}" ]]; then
-    ALIAS="${METHOD_NAME}_${CLUSTERING_LABEL}_${DATASET}_seed${SEED}"
+    EXPERIMENT_ALIAS="${METHOD_NAME}_${CLUSTERING_LABEL}_${DATASET}"
   else
-    ALIAS="${METHOD_NAME}_${DATASET}_seed${SEED}"
+    EXPERIMENT_ALIAS="${METHOD_NAME}_${DATASET}"
   fi
+  ALIAS="${EXPERIMENT_ALIAS}_seed${SEED}"
   INDEX_FILE=".${ALIAS}.index.json"
 
   OUT_DIR="${GENSID_CACHE_DIR}/mincut_runs/${ALIAS}"
@@ -203,7 +204,10 @@ for SEED in "${SEEDS[@]}"; do
   MAP_ENV="logs/env/${ALIAS}_sid_mapping.env"
 
   LOG_FILE="logs/${ALIAS,,}.log"
-  FINAL_METRICS_FILE="results/${ALIAS,,}.json"
+  RESULTS_DIR="results/${EXPERIMENT_ALIAS,,}"
+  FINAL_METRICS_FILE="${RESULTS_DIR}/seed${SEED}.metrics.json"
+  SID_STATS_FILE="${RESULTS_DIR}/seed${SEED}.sid_stats.json"
+  mkdir -p "${RESULTS_DIR}"
 
   echo -e "\n########################################"
   echo "Dataset: ${DATASET}"
@@ -273,6 +277,7 @@ for SEED in "${SEEDS[@]}"; do
     python "${GENSID_DIR}/generate_graph_cluster_indices.py" \
       --labels_path "${LABELS_PATH}" \
       --output_file "${GENSID_CACHE_DIR}/${DATASET}/${DATASET}${INDEX_FILE}" \
+      --stats_file "${SID_STATS_FILE}" \
       --label_group coarse_to_fine_item_labels \
       --unclustered_strategy special \
       --interactions_path "${INTERACTIONS_PATH}" \
