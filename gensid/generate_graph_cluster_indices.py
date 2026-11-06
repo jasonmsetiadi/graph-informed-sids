@@ -355,18 +355,8 @@ def popularity_length_stats(
     for length, pop in zip(lengths.tolist(), popularity.tolist()):
         grouped[int(length)].append(float(pop))
 
-    per_length = {}
-    for sid_length, values in sorted(grouped.items()):
-        array = np.asarray(values, dtype=np.float64)
-        per_length[str(sid_length)] = {
-            "count": int(array.size),
-            "pop_mean": float(array.mean()),
-            "pop_median": float(np.median(array)),
-            "pop_std": float(array.std(ddof=1)) if array.size > 1 else float("nan"),
-            "pop_min": float(array.min()),
-            "pop_max": float(array.max()),
-        }
-
+    head_mask = np.zeros(lengths.size, dtype=bool)
+    tail_mask = np.zeros(lengths.size, dtype=bool)
     if lengths.size > 1:
         group_size = min(
             lengths.size // 2,
@@ -374,11 +364,34 @@ def popularity_length_stats(
         )
         numeric_item_ids = np.asarray([int(item_id) for item_id in item_ids], dtype=np.int64)
         popularity_order = np.lexsort((numeric_item_ids, -popularity))
-        head_mask = np.zeros(lengths.size, dtype=bool)
-        tail_mask = np.zeros(lengths.size, dtype=bool)
         head_mask[popularity_order[:group_size]] = True
         tail_mask[popularity_order[-group_size:]] = True
-        middle_mask = ~(head_mask | tail_mask)
+    middle_mask = ~(head_mask | tail_mask)
+
+    per_length = {}
+    for sid_length, values in sorted(grouped.items()):
+        array = np.asarray(values, dtype=np.float64)
+        length_mask = lengths == sid_length
+        count = int(length_mask.sum())
+        count_head = int((length_mask & head_mask).sum())
+        count_middle = int((length_mask & middle_mask).sum())
+        count_longtail = int((length_mask & tail_mask).sum())
+        per_length[str(sid_length)] = {
+            "count": count,
+            "pop_mean": float(array.mean()),
+            "pop_median": float(np.median(array)),
+            "pop_std": float(array.std(ddof=1)) if array.size > 1 else float("nan"),
+            "pop_min": float(array.min()),
+            "pop_max": float(array.max()),
+            "count_head": count_head,
+            "count_middle": count_middle,
+            "count_longtail": count_longtail,
+            "pct_head": float(100.0 * count_head / count),
+            "pct_middle": float(100.0 * count_middle / count),
+            "pct_longtail": float(100.0 * count_longtail / count),
+        }
+
+    if lengths.size > 1:
         head_longtail = {
             "mean_length_head": float(lengths[head_mask].mean()),
             "mean_length_middle": (

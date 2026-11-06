@@ -104,9 +104,10 @@ Each generated SID stats JSON also follows the adjacent `varlen_semantic_ids`
 naming for length/popularity analysis: `length.mean_uniform/mean_unigram`,
 `popularity_length.pop_stats_by_length`, and `head_longtail`. Per-length
 popularity statistics include count, minimum, maximum, mean, median, and standard
-deviation. Length includes the terminal leaf. The head/middle/long-tail split is
-the most-popular 20%, middle 60%, and least-popular 20% by default, and frequency
-uses the graph's `SKIP_N_LAST` policy (default `2`).
+deviation, plus the count and percentage of head, middle, and long-tail items that
+stop at that exact length. Length includes the terminal leaf. The
+head/middle/long-tail split is the most-popular 20%, middle 60%, and least-popular
+20% by default, and frequency uses the graph's `SKIP_N_LAST` policy (default `2`).
 The `ns4gc` backend is a local weighted variant rather than the standard unweighted
 PyAGC objective. It uses raw interaction edge weights in GCN propagation and the
 neighbor-consistency loss, falling back to unit weights only when weights are absent.
