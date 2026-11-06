@@ -81,6 +81,8 @@ RECURSIVE_POPULARITY_ALPHA="${RECURSIVE_POPULARITY_ALPHA:-0}"
 DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
 DMON_POPULARITY_BALANCE_LAMBDA="${DMON_POPULARITY_BALANCE_LAMBDA:-0}"
 SKIP_N_LAST="${SKIP_N_LAST:-2}"
+EVAL_TARGET_POPULARITY_GROUPS="${EVAL_TARGET_POPULARITY_GROUPS:-false}"
+EVAL_POPULARITY_EXTREME_FRACTION="${EVAL_POPULARITY_EXTREME_FRACTION:-0.2}"
 case "${RECURSIVE_BRANCH_MODE}" in
   adaptive|fixed) ;;
   *)
@@ -350,6 +352,9 @@ for SEED in "${SEEDS[@]}"; do
       --val_eval_user_limit=0.2 \
       --train_batch_size=512 \
       --eval_batch_size=32 \
+      --eval_target_popularity_groups='${EVAL_TARGET_POPULARITY_GROUPS}' \
+      --eval_popularity_extreme_fraction='${EVAL_POPULARITY_EXTREME_FRACTION}' \
+      --eval_popularity_skip_n_last='${SKIP_N_LAST}' \
       --seed='${SEED}' \
       --sem_ids_path='${GR_SEM_IDS_PATH}' \
       --rq_n_codebooks='${GR_SEM_IDS_DEPTH}' \

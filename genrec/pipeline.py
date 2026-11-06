@@ -6,6 +6,7 @@ import os
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, Subset
 import math
+from collections import Counter, OrderedDict
 
 from genrec.dataset import AbstractDataset
 from genrec.model import AbstractModel
@@ -110,6 +111,57 @@ class Pipeline:
         )
         return Subset(val_dataset, indices)
 
+    def _test_target_popularity_groups(self):
+        """Assign each test example by its target item's training popularity."""
+        fraction = float(self.config.get('eval_popularity_extreme_fraction', 0.2))
+        if not 0.0 < fraction < 0.5:
+            raise ValueError('eval_popularity_extreme_fraction must be between 0 and 0.5')
+
+        skip_n_last = int(self.config.get('eval_popularity_skip_n_last', 2))
+        if skip_n_last < 0:
+            raise ValueError('eval_popularity_skip_n_last must be >= 0')
+
+        frequencies = Counter()
+        for sequence in self.raw_dataset.all_seqs.values():
+            items = sequence['item']
+            frequencies.update(items if skip_n_last == 0 else items[:-skip_n_last])
+
+        # Match generate_graph_cluster_indices.py's deterministic numeric-ID
+        # tie-breaking for items with equal popularity.
+        item_ids = list(range(1, self.raw_dataset.n_items))
+        group_size = min(
+            len(item_ids) // 2,
+            max(1, math.ceil(len(item_ids) * fraction)),
+        )
+        popularity_order = sorted(
+            item_ids,
+            key=lambda item_id: (
+                -frequencies.get(self.raw_dataset.id_mapping['id2item'][item_id], 0),
+                item_id,
+            ),
+        )
+        head = set(popularity_order[:group_size])
+        tail = set(popularity_order[-group_size:])
+
+        groups = []
+        for item_seq in self.split_datasets['test']['item_seq']:
+            target_id = self.raw_dataset.item2id[item_seq[-1]]
+            if target_id in head:
+                groups.append('head')
+            elif target_id in tail:
+                groups.append('tail')
+            else:
+                groups.append('middle')
+
+        ordered_groups = ['head', 'middle', 'tail']
+        counts = OrderedDict([('all', len(groups))])
+        counts.update((group, groups.count(group)) for group in ordered_groups)
+        self.log(
+            'Test target popularity groups: '
+            + ', '.join(f'{group}={count}' for group, count in counts.items())
+        )
+        return groups, counts
+
     def run(self):
         # DataLoader
         train_dataloader = DataLoader(
@@ -165,14 +217,42 @@ class Pipeline:
         if self.accelerator.is_main_process and self.checkpoint_path is None:
             self.log(f'Loaded best model checkpoint from {self.trainer.saved_model_ckpt}')
 
-        test_results = self.trainer.evaluate(test_dataloader)
+        grouped_test_eval = bool(self.config.get('eval_target_popularity_groups', False))
+        if grouped_test_eval:
+            test_groups, test_group_counts = self._test_target_popularity_groups()
+            test_results = self.trainer.evaluate(
+                test_dataloader,
+                split='test-by-target-popularity',
+                group_by_index=test_groups,
+            )
+            final_split = 'test_by_target_popularity'
+            final_metadata = OrderedDict([
+                ('group_counts', test_group_counts),
+                ('popularity_extreme_fraction', float(
+                    self.config.get('eval_popularity_extreme_fraction', 0.2)
+                )),
+                ('popularity_skip_n_last', int(
+                    self.config.get('eval_popularity_skip_n_last', 2)
+                )),
+            ])
+        else:
+            test_results = self.trainer.evaluate(test_dataloader)
+            final_split = 'test'
+            final_metadata = None
         self.trainer.save_final_metrics_json(
-            test_results
+            test_results,
+            split=final_split,
+            metadata=final_metadata,
         )
 
         if self.accelerator.is_main_process:
-            for key in test_results:
-                self.accelerator.log({f'Test_Metric/{key}': test_results[key]})
+            if grouped_test_eval:
+                for group, metrics in test_results.items():
+                    for key, value in metrics.items():
+                        self.accelerator.log({f'Test_Metric/{group}/{key}': value})
+            else:
+                for key in test_results:
+                    self.accelerator.log({f'Test_Metric/{key}': test_results[key]})
         self.log(f'Test Results: {test_results}')
 
         self.trainer.end()

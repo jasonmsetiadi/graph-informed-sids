@@ -173,7 +173,9 @@ class Trainer:
             return [Trainer._json_safe_value(item) for item in value]
         return value
 
-    def save_final_metrics_json(self, results, step=None, epoch=None, split='test'):
+    def save_final_metrics_json(
+        self, results, step=None, epoch=None, split='test', metadata=None
+    ):
         """Save the final evaluation metrics to a standalone JSON file."""
         if not self.accelerator.is_main_process:
             return
@@ -186,6 +188,7 @@ class Trainer:
             ('step', self._json_safe_value(step)),
             ('epoch', self._json_safe_value(epoch)),
             ('split', split),
+            ('metadata', self._json_safe_value(metadata)),
             ('metrics', OrderedDict(
                 (key, self._json_safe_value(value)) for key, value in results.items()
             )),
@@ -196,13 +199,15 @@ class Trainer:
 
         self.log(f"Saved final {split} metrics JSON to {self.final_metrics_file}")
 
-    def evaluate(self, dataloader, split='test'):
+    def evaluate(self, dataloader, split='test', group_by_index=None):
         """
         Evaluate the model on the given dataloader.
 
         Args:
             dataloader (torch.utils.data.DataLoader): The dataloader to evaluate on.
             split (str, optional): The split name. Defaults to 'test'.
+            group_by_index (list[str], optional): Group label for each original
+                dataset index. When provided, metrics are returned per group.
 
         Returns:
             OrderedDict: A dictionary containing the evaluation results.
@@ -210,6 +215,13 @@ class Trainer:
         self.model.eval()
 
         all_results = defaultdict(list)
+        observed_groups = set(group_by_index or [])
+        preferred_order = ['head', 'middle', 'tail']
+        group_names = [group for group in preferred_order if group in observed_groups]
+        group_names.extend(sorted(observed_groups - set(group_names)))
+        grouped_results = OrderedDict(
+            (group, defaultdict(list)) for group in group_names
+        )
         val_progress_bar = tqdm(
             dataloader,
             total=len(dataloader),
@@ -221,15 +233,52 @@ class Trainer:
                 if self.config['use_ddp']: # ddp, gather data from all devices for evaluation
                     model_out = self.model.module.generate(batch, n_return_sequences=self.evaluator.maxk)
                     model_out['labels'] = batch['labels']
+                    if group_by_index is not None:
+                        model_out['example_indices'] = batch['idx']
                     all_outs = self.accelerator.gather_for_metrics(model_out)
                     all_labels = all_outs.pop('labels', None)
+                    evaluation_indices = all_outs.pop('example_indices', None)
                     results = self.evaluator.calculate_metrics(all_outs, all_labels)
                 else:
                     model_out = self.model.generate(batch, n_return_sequences=self.evaluator.maxk)
+                    evaluation_indices = batch.get('idx')
                     results = self.evaluator.calculate_metrics(model_out, batch['labels'])
+
+                if group_by_index is not None:
+                    if evaluation_indices is None:
+                        raise ValueError(
+                            "Grouped evaluation requires an 'idx' field in every batch."
+                        )
+                    indices = evaluation_indices.detach().cpu().tolist()
+                    batch_groups = [group_by_index[index] for index in indices]
 
                 for key, value in results.items():
                     all_results[key].append(value)
+                    if group_by_index is not None:
+                        for group in grouped_results:
+                            mask = torch.tensor(
+                                [name == group for name in batch_groups],
+                                dtype=torch.bool,
+                            )
+                            if mask.any():
+                                grouped_results[group][key].append(value[mask])
+
+        def aggregate(result_lists):
+            output = OrderedDict()
+            for metric in self.config['metrics']:
+                for k in self.config['topk']:
+                    key = f"{metric}@{k}"
+                    values = result_lists[key]
+                    output[key] = torch.cat(values).mean().item() if values else None
+            return output
+
+        if group_by_index is not None:
+            output_results = OrderedDict([('all', aggregate(all_results))])
+            output_results.update(
+                (group, aggregate(result_lists))
+                for group, result_lists in grouped_results.items()
+            )
+            return output_results
 
         output_results = OrderedDict()
         for metric in self.config['metrics']:
