@@ -1,0 +1,68 @@
+{
+  "num_items": 12101,
+  "num_unique_sids": 12101,
+  "num_colliding_items": 0,
+  "collision_rate": 0.0,
+  "max_collision_group_size": 1,
+  "labels_path": "cache/gensid/mincut_runs/RecKMeans_t5_semantic_badaptive_dfixed_max10_l4_popb0p001_a0_Beauty_seed43/graph_hierarchy_labels.json",
+  "label_group": "coarse_to_fine_item_labels",
+  "levels": [
+    "level_1",
+    "level_2",
+    "level_3",
+    "level_4"
+  ],
+  "num_levels": 4,
+  "append_unique_leaf": true,
+  "variable_length": false,
+  "unclustered_strategy": "special",
+  "level_cluster_counts_excluding_minus1": {
+    "level_1": 5,
+    "level_2": 13,
+    "level_3": 45,
+    "level_4": 239
+  },
+  "level_unclustered_counts": {
+    "level_1": 33,
+    "level_2": 33,
+    "level_3": 33,
+    "level_4": 33
+  },
+  "length": {
+    "mean_uniform": 5.0,
+    "mean_unigram": 5.0
+  },
+  "popularity_length": {
+    "pop_stats_by_length": {
+      "5": {
+        "count": 12101,
+        "pop_mean": 12.707710106602761,
+        "pop_median": 7.0,
+        "pop_std": 19.78446917950119,
+        "pop_min": 0.0,
+        "pop_max": 369.0,
+        "count_head": 2421,
+        "count_middle": 7259,
+        "count_longtail": 2421,
+        "pct_head": 20.006611023882325,
+        "pct_middle": 59.98677795223535,
+        "pct_longtail": 20.006611023882325
+      }
+    }
+  },
+  "head_longtail": {
+    "mean_length_head": 5.0,
+    "mean_length_middle": 5.0,
+    "mean_length_longtail": 5.0,
+    "count_head": 2421,
+    "count_middle": 7259,
+    "count_longtail": 2421
+  },
+  "sid_length_min": 5,
+  "sid_length_max": 5,
+  "sid_length_mean": 5.0,
+  "sid_length_histogram": {
+    "5": 12101
+  },
+  "reindex_contiguous": false
+}

@@ -1,0 +1,167 @@
+{
+  "num_items": 12101,
+  "num_unique_sids": 12101,
+  "num_colliding_items": 0,
+  "collision_rate": 0.0,
+  "max_collision_group_size": 1,
+  "labels_path": "cache/gensid/mincut_runs/RecSpectral_t5_semantic_alpha0.5_k20_badaptive_dadaptive_max10_popb0p001_a0p5_Beauty_seed42/graph_hierarchy_labels.json",
+  "label_group": "coarse_to_fine_item_labels",
+  "levels": [
+    "level_1",
+    "level_2",
+    "level_3",
+    "level_4",
+    "level_5",
+    "level_6",
+    "level_7"
+  ],
+  "num_levels": 7,
+  "append_unique_leaf": true,
+  "variable_length": true,
+  "unclustered_strategy": "special",
+  "level_cluster_counts_excluding_minus1": {
+    "level_1": 8,
+    "level_2": 21,
+    "level_3": 75,
+    "level_4": 222,
+    "level_5": 314,
+    "level_6": 325,
+    "level_7": 326
+  },
+  "level_unclustered_counts": {
+    "level_1": 33,
+    "level_2": 33,
+    "level_3": 33,
+    "level_4": 33,
+    "level_5": 33,
+    "level_6": 33,
+    "level_7": 33
+  },
+  "length": {
+    "mean_uniform": 2.792992314684737,
+    "mean_unigram": 2.606421027988763
+  },
+  "popularity_length": {
+    "pop_stats_by_length": {
+      "2": {
+        "count": 7781,
+        "pop_mean": 14.025189564323352,
+        "pop_median": 7.0,
+        "pop_std": 22.307874567468698,
+        "pop_min": 0.0,
+        "pop_max": 369.0,
+        "count_head": 1733,
+        "count_middle": 4524,
+        "count_longtail": 1524,
+        "pct_head": 22.27220151651459,
+        "pct_middle": 58.14162704022619,
+        "pct_longtail": 19.58617144325922
+      },
+      "3": {
+        "count": 1577,
+        "pop_mean": 12.173747622067216,
+        "pop_median": 7.0,
+        "pop_std": 16.27153772133954,
+        "pop_min": 1.0,
+        "pop_max": 208.0,
+        "count_head": 326,
+        "count_middle": 943,
+        "count_longtail": 308,
+        "pct_head": 20.672162333544705,
+        "pct_middle": 59.79708306911858,
+        "pct_longtail": 19.530754597336717
+      },
+      "4": {
+        "count": 1037,
+        "pop_mean": 9.15043394406943,
+        "pop_median": 6.0,
+        "pop_std": 9.71438313411488,
+        "pop_min": 1.0,
+        "pop_max": 127.0,
+        "count_head": 147,
+        "count_middle": 681,
+        "count_longtail": 209,
+        "pct_head": 14.175506268081003,
+        "pct_middle": 65.6702025072324,
+        "pct_longtail": 20.154291224686595
+      },
+      "5": {
+        "count": 977,
+        "pop_mean": 9.833162743091096,
+        "pop_median": 6.0,
+        "pop_std": 15.859585117185956,
+        "pop_min": 1.0,
+        "pop_max": 311.0,
+        "count_head": 128,
+        "count_middle": 640,
+        "count_longtail": 209,
+        "pct_head": 13.101330603889458,
+        "pct_middle": 65.50665301944728,
+        "pct_longtail": 21.392016376663253
+      },
+      "6": {
+        "count": 638,
+        "pop_mean": 8.691222570532915,
+        "pop_median": 6.0,
+        "pop_std": 8.823239868000925,
+        "pop_min": 1.0,
+        "pop_max": 84.0,
+        "count_head": 74,
+        "count_middle": 418,
+        "count_longtail": 146,
+        "pct_head": 11.598746081504702,
+        "pct_middle": 65.51724137931035,
+        "pct_longtail": 22.884012539184955
+      },
+      "7": {
+        "count": 84,
+        "pop_mean": 9.119047619047619,
+        "pop_median": 6.0,
+        "pop_std": 9.570794885728825,
+        "pop_min": 2.0,
+        "pop_max": 48.0,
+        "count_head": 13,
+        "count_middle": 47,
+        "count_longtail": 24,
+        "pct_head": 15.476190476190476,
+        "pct_middle": 55.95238095238095,
+        "pct_longtail": 28.571428571428573
+      },
+      "8": {
+        "count": 7,
+        "pop_mean": 5.857142857142857,
+        "pop_median": 5.0,
+        "pop_std": 2.115700942049815,
+        "pop_min": 4.0,
+        "pop_max": 10.0,
+        "count_head": 0,
+        "count_middle": 6,
+        "count_longtail": 1,
+        "pct_head": 0.0,
+        "pct_middle": 85.71428571428571,
+        "pct_longtail": 14.285714285714286
+      }
+    }
+  },
+  "head_longtail": {
+    "mean_length_head": 2.563816604708798,
+    "mean_length_middle": 2.8497038159526107,
+    "mean_length_longtail": 2.85212722015696,
+    "count_head": 2421,
+    "count_middle": 7259,
+    "count_longtail": 2421
+  },
+  "sid_length_min": 2,
+  "sid_length_max": 8,
+  "sid_length_mean": 2.792992314684737,
+  "sid_length_histogram": {
+    "2": 7781,
+    "3": 1577,
+    "4": 1037,
+    "5": 977,
+    "6": 638,
+    "7": 84,
+    "8": 7
+  },
+  "reindex_contiguous": false
+}

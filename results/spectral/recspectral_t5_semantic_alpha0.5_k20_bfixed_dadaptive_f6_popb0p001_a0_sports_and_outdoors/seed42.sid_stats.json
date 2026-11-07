@@ -1,0 +1,116 @@
+{
+  "num_items": 18357,
+  "num_unique_sids": 18357,
+  "num_colliding_items": 0,
+  "collision_rate": 0.0,
+  "max_collision_group_size": 1,
+  "labels_path": "cache/gensid/mincut_runs/RecSpectral_t5_semantic_alpha0.5_k20_bfixed_dadaptive_f6_popb0p001_a0_Sports_and_Outdoors_seed42/graph_hierarchy_labels.json",
+  "label_group": "coarse_to_fine_item_labels",
+  "levels": [
+    "level_1",
+    "level_2",
+    "level_3",
+    "level_4",
+    "level_5",
+    "level_6",
+    "level_7"
+  ],
+  "num_levels": 7,
+  "append_unique_leaf": true,
+  "variable_length": true,
+  "unclustered_strategy": "special",
+  "level_cluster_counts_excluding_minus1": {
+    "level_1": 6,
+    "level_2": 36,
+    "level_3": 216,
+    "level_4": 1191,
+    "level_5": 3861,
+    "level_6": 5011,
+    "level_7": 5021
+  },
+  "level_unclustered_counts": {
+    "level_1": 73,
+    "level_2": 73,
+    "level_3": 73,
+    "level_4": 73,
+    "level_5": 73,
+    "level_6": 73,
+    "level_7": 73
+  },
+  "length": {
+    "mean_uniform": 5.908972054257232,
+    "mean_unigram": 5.97053846256346
+  },
+  "popularity_length": {
+    "pop_stats_by_length": {
+      "2": {
+        "count": 73,
+        "pop_mean": 0.0,
+        "pop_median": 0.0,
+        "pop_std": 0.0,
+        "pop_min": 0.0,
+        "pop_max": 0.0
+      },
+      "4": {
+        "count": 174,
+        "pop_mean": 7.764367816091954,
+        "pop_median": 6.0,
+        "pop_std": 7.274684539357448,
+        "pop_min": 1.0,
+        "pop_max": 62.0
+      },
+      "5": {
+        "count": 4103,
+        "pop_mean": 11.870582500609311,
+        "pop_median": 6.0,
+        "pop_std": 24.704604312435144,
+        "pop_min": 1.0,
+        "pop_max": 623.0
+      },
+      "6": {
+        "count": 10951,
+        "pop_mean": 11.914437037713451,
+        "pop_median": 7.0,
+        "pop_std": 19.295725098529513,
+        "pop_min": 1.0,
+        "pop_max": 880.0
+      },
+      "7": {
+        "count": 3040,
+        "pop_mean": 14.620394736842105,
+        "pop_median": 8.0,
+        "pop_std": 22.520671178157215,
+        "pop_min": 1.0,
+        "pop_max": 386.0
+      },
+      "8": {
+        "count": 16,
+        "pop_mean": 10.25,
+        "pop_median": 6.0,
+        "pop_std": 11.930353445448855,
+        "pop_min": 2.0,
+        "pop_max": 49.0
+      }
+    }
+  },
+  "head_longtail": {
+    "mean_length_head": 6.014433551198257,
+    "mean_length_middle": 5.912921093253428,
+    "mean_length_longtail": 5.791666666666667,
+    "count_head": 3672,
+    "count_middle": 11013,
+    "count_longtail": 3672
+  },
+  "sid_length_min": 2,
+  "sid_length_max": 8,
+  "sid_length_mean": 5.908972054257232,
+  "sid_length_histogram": {
+    "2": 73,
+    "4": 174,
+    "5": 4103,
+    "6": 10951,
+    "7": 3040,
+    "8": 16
+  },
+  "reindex_contiguous": false
+}
