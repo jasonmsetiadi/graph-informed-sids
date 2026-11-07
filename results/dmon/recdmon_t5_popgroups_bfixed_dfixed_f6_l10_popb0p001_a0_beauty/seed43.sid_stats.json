@@ -1,0 +1,86 @@
+{
+  "num_items": 12101,
+  "num_unique_sids": 12101,
+  "num_colliding_items": 0,
+  "collision_rate": 0.0,
+  "max_collision_group_size": 1,
+  "labels_path": "cache/gensid/mincut_runs/RecDMoN_t5_popgroups_bfixed_dfixed_f6_l10_popb0p001_a0_Beauty_seed43/graph_hierarchy_labels.json",
+  "label_group": "coarse_to_fine_item_labels",
+  "levels": [
+    "level_1",
+    "level_2",
+    "level_3",
+    "level_4",
+    "level_5",
+    "level_6",
+    "level_7",
+    "level_8",
+    "level_9",
+    "level_10"
+  ],
+  "num_levels": 10,
+  "append_unique_leaf": true,
+  "variable_length": false,
+  "unclustered_strategy": "special",
+  "level_cluster_counts_excluding_minus1": {
+    "level_1": 6,
+    "level_2": 36,
+    "level_3": 215,
+    "level_4": 1213,
+    "level_5": 5093,
+    "level_6": 11341,
+    "level_7": 11967,
+    "level_8": 12005,
+    "level_9": 12005,
+    "level_10": 12005
+  },
+  "level_unclustered_counts": {
+    "level_1": 33,
+    "level_2": 33,
+    "level_3": 33,
+    "level_4": 33,
+    "level_5": 33,
+    "level_6": 33,
+    "level_7": 33,
+    "level_8": 33,
+    "level_9": 33,
+    "level_10": 33
+  },
+  "length": {
+    "mean_uniform": 11.0,
+    "mean_unigram": 11.0
+  },
+  "popularity_length": {
+    "pop_stats_by_length": {
+      "11": {
+        "count": 12101,
+        "pop_mean": 12.707710106602761,
+        "pop_median": 7.0,
+        "pop_std": 19.78446917950119,
+        "pop_min": 0.0,
+        "pop_max": 369.0,
+        "count_head": 2421,
+        "count_middle": 7259,
+        "count_longtail": 2421,
+        "pct_head": 100.0,
+        "pct_middle": 100.0,
+        "pct_longtail": 100.0
+      }
+    }
+  },
+  "head_longtail": {
+    "mean_length_head": 11.0,
+    "mean_length_middle": 11.0,
+    "mean_length_longtail": 11.0,
+    "count_head": 2421,
+    "count_middle": 7259,
+    "count_longtail": 2421
+  },
+  "sid_length_min": 11,
+  "sid_length_max": 11,
+  "sid_length_mean": 11.0,
+  "sid_length_histogram": {
+    "11": 12101
+  },
+  "reindex_contiguous": false
+}
