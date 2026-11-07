@@ -367,6 +367,9 @@ def popularity_length_stats(
         head_mask[popularity_order[:group_size]] = True
         tail_mask[popularity_order[-group_size:]] = True
     middle_mask = ~(head_mask | tail_mask)
+    total_head = int(head_mask.sum())
+    total_middle = int(middle_mask.sum())
+    total_longtail = int(tail_mask.sum())
 
     per_length = {}
     for sid_length, values in sorted(grouped.items()):
@@ -386,9 +389,16 @@ def popularity_length_stats(
             "count_head": count_head,
             "count_middle": count_middle,
             "count_longtail": count_longtail,
-            "pct_head": float(100.0 * count_head / count),
-            "pct_middle": float(100.0 * count_middle / count),
-            "pct_longtail": float(100.0 * count_longtail / count),
+            "pct_head": (
+                float(100.0 * count_head / total_head) if total_head else 0.0
+            ),
+            "pct_middle": (
+                float(100.0 * count_middle / total_middle) if total_middle else 0.0
+            ),
+            "pct_longtail": (
+                float(100.0 * count_longtail / total_longtail)
+                if total_longtail else 0.0
+            ),
         }
 
     if lengths.size > 1:
@@ -398,9 +408,9 @@ def popularity_length_stats(
                 float(lengths[middle_mask].mean()) if middle_mask.any() else float("nan")
             ),
             "mean_length_longtail": float(lengths[tail_mask].mean()),
-            "count_head": int(head_mask.sum()),
-            "count_middle": int(middle_mask.sum()),
-            "count_longtail": int(tail_mask.sum()),
+            "count_head": total_head,
+            "count_middle": total_middle,
+            "count_longtail": total_longtail,
         }
     else:
         head_longtail = {}
