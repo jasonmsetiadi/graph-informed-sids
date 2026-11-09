@@ -1,0 +1,41 @@
+{
+  "step": null,
+  "epoch": null,
+  "split": "test_by_target_popularity",
+  "metadata": {
+    "group_counts": {
+      "all": 35598,
+      "head": 15514,
+      "middle": 13480,
+      "tail": 6604
+    },
+    "popularity_extreme_fraction": 0.2,
+    "popularity_skip_n_last": 2
+  },
+  "metrics": {
+    "all": {
+      "ndcg@5": 0.011189807206392288,
+      "ndcg@10": 0.015157070942223072,
+      "recall@5": 0.01780998893082142,
+      "recall@10": 0.03014214336872101
+    },
+    "head": {
+      "ndcg@5": 0.025292893871665,
+      "ndcg@10": 0.034126803278923035,
+      "recall@5": 0.040286194533109665,
+      "recall@10": 0.06774526089429855
+    },
+    "middle": {
+      "ndcg@5": 0.000440707866800949,
+      "ndcg@10": 0.000750599370803684,
+      "recall@5": 0.0006676557823084295,
+      "recall@10": 0.0016320474678650498
+    },
+    "tail": {
+      "ndcg@5": 0.0,
+      "ndcg@10": 0.0,
+      "recall@5": 0.0,
+      "recall@10": 0.0
+    }
+  }
+}
