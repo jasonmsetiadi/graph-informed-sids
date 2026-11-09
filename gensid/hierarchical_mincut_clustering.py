@@ -206,6 +206,15 @@ def load_item_log_frequencies(
     return np.log1p(load_item_frequencies(interactions_path, item_ids, num_items, skip_n_last))
 
 
+def rank_quantile_bins(values: np.ndarray, num_bins: int) -> np.ndarray:
+    """Assign near-equal-size global popularity bins from rarest to most popular."""
+    order = np.argsort(values, kind="stable")
+    bin_ids = np.empty(len(values), dtype=np.int64)
+    ranks = np.arange(len(values), dtype=np.int64)
+    bin_ids[order] = np.minimum(ranks * num_bins // max(len(values), 1), num_bins - 1)
+    return bin_ids
+
+
 def normalize_active_parent_popularity(
     parent_labels: np.ndarray,
     active_parents: set[int],
@@ -435,8 +444,20 @@ def save_outputs(
             metadata["dmon_popularity_balance_lambda"] = float(
                 args.dmon_popularity_balance_lambda
             )
-            metadata["dmon_popularity_balance_weights"] = (
+            metadata["dmon_popularity_mass_objective"] = (
+                args.dmon_popularity_mass_objective
+            )
+            metadata["dmon_popularity_mass_weights"] = (
                 "parent_local_smoothed_training_interaction_counts_plus_one"
+            )
+            metadata["dmon_popularity_separation_values"] = (
+                "parent_local_minmax_log1p_training_interaction_counts"
+            )
+            metadata["dmon_popularity_purity_bins"] = int(
+                args.dmon_popularity_purity_bins
+            )
+            metadata["dmon_popularity_purity_binning"] = (
+                "global_rank_quantiles_of_training_interaction_counts"
             )
         if args.method == "recursive_leiden":
             metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
@@ -1149,7 +1170,10 @@ def dense_dmon_local_loss(
     balance_weight: float = 1.0,
     entropy_weight: float = 0.01,
     popularity_weights: torch.Tensor | None = None,
+    popularity_values: torch.Tensor | None = None,
+    popularity_bin_membership: torch.Tensor | None = None,
     popularity_balance_lambda: float = 0.0,
+    popularity_mass_objective: str = "balance",
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     s = F.softmax(logits, dim=-1)  # [N, K]
     deg = adj.sum(dim=1)
@@ -1163,24 +1187,62 @@ def dense_dmon_local_loss(
     k = s.size(1)
     uniform_balance = ((p - 1.0 / k) ** 2).sum()
     balance = uniform_balance
+    popularity_mass_loss = logits.new_zeros(())
     if popularity_balance_lambda > 0.0:
-        if popularity_weights is None:
-            raise ValueError("Popularity weights are required when popularity balance is enabled")
-        popularity_mass = s.t() @ popularity_weights
-        popularity_balance = ((popularity_mass - 1.0 / k) ** 2).sum()
-        balance = (
-            (1.0 - popularity_balance_lambda) * uniform_balance
-            + popularity_balance_lambda * popularity_balance
-        )
+        if popularity_mass_objective in {"balance", "concentrate"}:
+            if popularity_weights is None:
+                raise ValueError(
+                    "Popularity weights are required for balance and concentrate objectives"
+                )
+            popularity_mass = s.t() @ popularity_weights
+        if popularity_mass_objective == "balance":
+            popularity_mass_loss = ((popularity_mass - 1.0 / k) ** 2).sum()
+            balance = (
+                (1.0 - popularity_balance_lambda) * uniform_balance
+                + popularity_balance_lambda * popularity_mass_loss
+            )
+        elif popularity_mass_objective == "concentrate":
+            popularity_mass_loss = -(
+                popularity_mass * torch.log(popularity_mass.clamp_min(1e-12))
+            ).sum()
+        elif popularity_mass_objective == "separate":
+            if popularity_values is None:
+                raise ValueError(
+                    "Popularity values are required for the separate objective"
+                )
+            child_mass = s.sum(dim=0).clamp_min(1e-12)
+            child_mean_popularity = (s.t() @ popularity_values) / child_mass
+            popularity_mass_loss = -child_mean_popularity.var(unbiased=False)
+        elif popularity_mass_objective == "purity":
+            if popularity_bin_membership is None:
+                raise ValueError(
+                    "Popularity-bin membership is required for the purity objective"
+                )
+            child_bin_mass = s.t() @ popularity_bin_membership
+            child_mass = child_bin_mass.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            child_bin_probability = child_bin_mass / child_mass
+            child_bin_entropy = -(
+                child_bin_probability
+                * torch.log(child_bin_probability.clamp_min(1e-12))
+            ).sum(dim=1)
+            child_weight = child_mass.squeeze(1) / child_mass.sum().clamp_min(1e-12)
+            popularity_mass_loss = (child_weight * child_bin_entropy).sum()
+        else:
+            raise ValueError(
+                f"Unknown DMoN popularity-mass objective: {popularity_mass_objective}"
+            )
 
     # Positive entropy term encourages sharper assignments when minimized.
     entropy = -(s * torch.log(s.clamp_min(1e-12))).sum(dim=1).mean()
 
     loss = -modularity + balance_weight * balance + entropy_weight * entropy
+    if popularity_mass_objective in {"concentrate", "separate", "purity"}:
+        loss = loss + popularity_balance_lambda * popularity_mass_loss
     metrics = {
         "modularity": modularity.detach(),
         "balance": balance.detach(),
         "entropy": entropy.detach(),
+        "popularity_mass_loss": popularity_mass_loss.detach(),
     }
     return loss, metrics
 
@@ -1221,11 +1283,29 @@ def neural_cluster_subset(
     x_sub = x_all[torch.as_tensor(subset, dtype=torch.long)].to(device)
     adj = torch.as_tensor(A_sub_np, dtype=torch.float32, device=device)
     popularity_weights = None
+    popularity_values = None
+    popularity_bin_membership = None
     if args.dmon_popularity_balance_lambda > 0.0:
         if item_frequencies is None:
-            raise ValueError("Item frequencies are required for popularity-weighted DMoN balance")
-        local_counts = torch.as_tensor(item_frequencies[subset] + 1.0, dtype=torch.float32, device=device)
-        popularity_weights = local_counts / local_counts.sum().clamp_min(1e-12)
+            raise ValueError("Item frequencies are required for popularity-aware DMoN")
+        local_counts = torch.as_tensor(
+            item_frequencies[subset], dtype=torch.float32, device=device
+        )
+        smoothed_counts = local_counts + 1.0
+        popularity_weights = smoothed_counts / smoothed_counts.sum().clamp_min(1e-12)
+        local_log_popularity = torch.log1p(local_counts)
+        popularity_min = local_log_popularity.min()
+        popularity_range = local_log_popularity.max() - popularity_min
+        popularity_values = (
+            local_log_popularity - popularity_min
+        ) / popularity_range.clamp_min(1e-12)
+        if args.dmon_popularity_mass_objective == "purity":
+            local_bin_ids = torch.as_tensor(
+                args.dmon_popularity_bin_ids[subset], dtype=torch.long, device=device
+            )
+            popularity_bin_membership = F.one_hot(
+                local_bin_ids, num_classes=args.dmon_popularity_purity_bins
+            ).to(dtype=torch.float32)
 
     model = LocalAssignNet(x_sub.size(1), args.assign_hidden_dim, k, args.dropout).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -1242,7 +1322,10 @@ def neural_cluster_subset(
                 balance_weight=args.dmon_balance_weight,
                 entropy_weight=args.dmon_entropy_weight,
                 popularity_weights=popularity_weights,
+                popularity_values=popularity_values,
+                popularity_bin_membership=popularity_bin_membership,
                 popularity_balance_lambda=args.dmon_popularity_balance_lambda,
+                popularity_mass_objective=args.dmon_popularity_mass_objective,
             )
         else:
             raise ValueError(f"Unknown neural recursive method: {method}")
@@ -2392,7 +2475,30 @@ def parse_args() -> argparse.Namespace:
         "--dmon_popularity_balance_lambda",
         type=float,
         default=0.0,
-        help="Blend popularity-weighted balance into recursive DMoN; 0 preserves current behavior.",
+        help=(
+            "Popularity-mass strength. In balance mode, blend equal popularity mass "
+            "into the balance regularizer. In concentrate mode, weight the "
+            "popularity-mass entropy loss. In separate mode, weight negative variance "
+            "of child mean popularity. In purity mode, weight conditional popularity-bin "
+            "entropy. Zero disables all popularity objectives."
+        ),
+    )
+    parser.add_argument(
+        "--dmon_popularity_mass_objective",
+        choices=["balance", "concentrate", "separate", "purity"],
+        default="balance",
+        help=(
+            "Whether recursive DMoN encourages equal popularity mass across children "
+            "concentrates it by minimizing popularity-mass entropy, or separates "
+            "children by maximizing variance in their mean popularity or minimizing "
+            "popularity-bin entropy within children."
+        ),
+    )
+    parser.add_argument(
+        "--dmon_popularity_purity_bins",
+        type=int,
+        default=3,
+        help="Number of global rank-quantile popularity bins used by the purity objective.",
     )
 
     # Neural settings.
@@ -2436,6 +2542,8 @@ def main() -> None:
         raise ValueError("--recursive_popularity_epsilon_base must be >= 0")
     if not 0.0 <= args.dmon_popularity_balance_lambda <= 1.0:
         raise ValueError("--dmon_popularity_balance_lambda must be between 0 and 1")
+    if args.dmon_popularity_purity_bins < 2:
+        raise ValueError("--dmon_popularity_purity_bins must be at least 2")
     popularity_methods = {
         "recursive_dmon",
         "recursive_spectral",
@@ -2450,6 +2558,9 @@ def main() -> None:
             skip_n_last=args.skip_n_last,
         )
         item_log_frequencies = np.log1p(item_frequencies)
+        args.dmon_popularity_bin_ids = rank_quantile_bins(
+            item_frequencies, args.dmon_popularity_purity_bins
+        )
         print(
             f"Popularity-aware {args.method} threshold: "
             f"epsilon_base={args.recursive_popularity_epsilon_base}, "
@@ -2463,6 +2574,12 @@ def main() -> None:
             f"Recursive modes: branch={args.recursive_branch_mode}, "
             f"depth={args.recursive_depth_mode}, factor={args.recursive_factor}, "
             f"levels={args.recursive_levels}"
+        )
+    if args.method == "recursive_dmon":
+        print(
+            "DMoN popularity-mass objective: "
+            f"{args.dmon_popularity_mass_objective}, "
+            f"lambda={args.dmon_popularity_balance_lambda}"
         )
     print(f"Loaded graph nodes used: {x_graph.size(0)}, edges used: {edge_index.size(1)}, emb dim: {x_graph.size(1)}")
 
