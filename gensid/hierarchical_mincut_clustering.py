@@ -14,9 +14,9 @@ Methods:
 For recursive spectral and DMoN, --recursive_factor is the maximum child count.
 Spectral proposes k >= 2 from the largest normalized-Laplacian eigengap and
 validates the partition with local weighted modularity. DMoN trains every
-k >= 2 candidate for a short screening budget, selects the highest local
-weighted modularity, and fully retrains only that k. Branches stop when the
-final proposal lacks sufficient gain.
+k >= 2 candidate for a short screening budget and fully retrains only the
+winner. With the soft next-item surrogate enabled, candidate selection and
+adaptive stopping combine local modularity with held-out sequential gain.
 Graph-embedding KMeans sweeps k >= 2 and selects the best embedding-space
 silhouette score, without constructing an additional graph.
 
@@ -67,6 +67,138 @@ from graph_aware_sid.graph_utils import InteractionGraphBuilder, load_train_item
 from graph_aware_sid.magi import build_magi_embeddings
 from graph_aware_sid.ns4gc import build_ns4gc_embeddings
 from graph_aware_sid.s3gc import build_s3gc_embeddings
+
+
+# -----------------------------------------------------------------------------
+# Sequential transition loading
+# -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IndexedTransitions:
+    sources: np.ndarray
+    targets: np.ndarray
+    source_offsets: np.ndarray
+
+
+@dataclass(frozen=True)
+class TransitionPairs:
+    train: IndexedTransitions
+    evaluation: IndexedTransitions
+
+
+@dataclass(frozen=True)
+class LocalTransitionPairs:
+    train_sources: np.ndarray
+    train_targets: np.ndarray
+    eval_sources: np.ndarray
+    eval_targets: np.ndarray
+
+    @property
+    def available(self) -> bool:
+        return self.train_sources.size > 0 and self.eval_sources.size > 0
+
+
+def load_transition_pairs(
+    interactions_path: str,
+    item_ids: np.ndarray,
+    num_items: int,
+    skip_n_last: int | None,
+    holdout_fraction: float,
+    seed: int,
+) -> TransitionPairs:
+    """Load directed consecutive training pairs in graph-node index space."""
+    with open(interactions_path, "r") as f:
+        interactions = json.load(f)
+
+    item_to_node = np.full(num_items, -1, dtype=np.int64)
+    item_to_node[item_ids] = np.arange(len(item_ids), dtype=np.int64)
+    sources: List[int] = []
+    targets: List[int] = []
+    for items in interactions.values():
+        train_items = items if skip_n_last in (None, 0) else items[:-skip_n_last]
+        for source_item, target_item in zip(train_items[:-1], train_items[1:]):
+            source_item = int(source_item)
+            target_item = int(target_item)
+            if not (0 <= source_item < num_items and 0 <= target_item < num_items):
+                raise ValueError(
+                    "Sequential transition contains an item outside the embeddings range: "
+                    f"({source_item}, {target_item}) vs [0, {num_items})"
+                )
+            source_node = int(item_to_node[source_item])
+            target_node = int(item_to_node[target_item])
+            if source_node >= 0 and target_node >= 0:
+                sources.append(source_node)
+                targets.append(target_node)
+
+    source_array = np.asarray(sources, dtype=np.int64)
+    target_array = np.asarray(targets, dtype=np.int64)
+    rng = np.random.default_rng(seed)
+    eval_mask = rng.random(source_array.size) < holdout_fraction
+
+    def index_split(split_sources: np.ndarray, split_targets: np.ndarray):
+        order = np.argsort(split_sources, kind="stable")
+        split_sources = split_sources[order]
+        split_targets = split_targets[order]
+        counts = np.bincount(split_sources, minlength=len(item_ids))
+        offsets = np.empty(len(item_ids) + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(counts, out=offsets[1:])
+        return IndexedTransitions(split_sources, split_targets, offsets)
+
+    return TransitionPairs(
+        train=index_split(source_array[~eval_mask], target_array[~eval_mask]),
+        evaluation=index_split(source_array[eval_mask], target_array[eval_mask]),
+    )
+
+
+def local_transition_pairs(
+    transitions: TransitionPairs | None,
+    subset: np.ndarray,
+    num_nodes: int,
+    min_cluster_size: int,
+    min_pairs: int,
+    max_pairs: int,
+    seed: int,
+) -> LocalTransitionPairs | None:
+    """Filter global pairs to a parent and convert them to local row indices."""
+    if transitions is None or len(subset) < min_cluster_size:
+        return None
+
+    global_to_local = np.full(num_nodes, -1, dtype=np.int64)
+    global_to_local[subset] = np.arange(len(subset), dtype=np.int64)
+
+    def select(indexed: IndexedTransitions, split_seed: int):
+        counts = indexed.source_offsets[subset + 1] - indexed.source_offsets[subset]
+        local_sources = np.repeat(np.arange(len(subset), dtype=np.int64), counts)
+        target_parts = [
+            indexed.targets[indexed.source_offsets[node] : indexed.source_offsets[node + 1]]
+            for node, count in zip(subset, counts)
+            if count > 0
+        ]
+        if not target_parts:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+        local_targets = global_to_local[np.concatenate(target_parts)]
+        keep = local_targets >= 0
+        local_sources = local_sources[keep]
+        local_targets = local_targets[keep]
+        if max_pairs > 0 and local_sources.size > max_pairs:
+            rng = np.random.default_rng(split_seed)
+            selected = rng.choice(local_sources.size, size=max_pairs, replace=False)
+            local_sources = local_sources[selected]
+            local_targets = local_targets[selected]
+        return local_sources, local_targets
+
+    train_sources, train_targets = select(transitions.train, seed)
+    eval_sources, eval_targets = select(transitions.evaluation, seed + 1)
+    if train_sources.size < min_pairs or eval_sources.size < 1:
+        return None
+    return LocalTransitionPairs(
+        train_sources=train_sources,
+        train_targets=train_targets,
+        eval_sources=eval_sources,
+        eval_targets=eval_targets,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -506,6 +638,28 @@ def save_outputs(
             metadata["dmon_popularity_purity_binning"] = (
                 "global_rank_quantiles_of_training_interaction_counts"
             )
+            metadata["dmon_prediction_lambda"] = float(args.dmon_prediction_lambda)
+            metadata["dmon_prediction_holdout_fraction"] = float(
+                args.dmon_prediction_holdout_fraction
+            )
+            metadata["dmon_prediction_min_cluster_size"] = int(
+                args.dmon_prediction_min_cluster_size
+            )
+            metadata["dmon_prediction_min_pairs"] = int(
+                args.dmon_prediction_min_pairs
+            )
+            metadata["dmon_prediction_max_pairs"] = int(
+                args.dmon_prediction_max_pairs
+            )
+            metadata["dmon_modularity_score_weight"] = float(
+                args.dmon_modularity_score_weight
+            )
+            metadata["dmon_prediction_gain_threshold"] = float(
+                args.dmon_prediction_gain_threshold
+            )
+            metadata["dmon_prediction_baseline"] = (
+                "held_out_marginal_next_soft_assignment_cross_entropy"
+            )
         if args.method == "recursive_leiden":
             metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
         elif args.method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
@@ -547,7 +701,11 @@ def save_outputs(
                 metadata["recursive_branch_selection"] = (
                     "normalized_laplacian_largest_nontrivial_eigengap"
                     if args.method == "recursive_spectral"
-                    else "dmon_candidate_sweep_highest_local_modularity"
+                    else (
+                        "dmon_candidate_sweep_combined_modularity_prediction"
+                        if args.dmon_prediction_lambda > 0.0
+                        else "dmon_candidate_sweep_highest_local_modularity"
+                    )
                 )
                 if args.method == "recursive_dmon":
                     metadata["dmon_selection_epochs"] = int(
@@ -1234,6 +1392,76 @@ class LocalAssignNet(nn.Module):
         return self.net(x)
 
 
+class SoftAssignmentPredictor(nn.Module):
+    def __init__(self, k: int):
+        super().__init__()
+        self.linear = nn.Linear(k, k)
+
+    def forward(self, assignments: torch.Tensor) -> torch.Tensor:
+        return self.linear(assignments)
+
+
+def soft_next_item_prediction_loss(
+    assignments: torch.Tensor,
+    predictor: SoftAssignmentPredictor,
+    sources: torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    predicted_log_probabilities = F.log_softmax(
+        predictor(assignments[sources]), dim=-1
+    )
+    target_assignments = assignments[targets]
+    return -(target_assignments * predicted_log_probabilities).sum(dim=-1).mean()
+
+
+def evaluate_soft_next_item_prediction(
+    assignments: torch.Tensor,
+    predictor: SoftAssignmentPredictor,
+    sources: torch.Tensor,
+    targets: torch.Tensor,
+) -> Dict[str, float]:
+    target_assignments = assignments[targets]
+    predicted_log_probabilities = F.log_softmax(
+        predictor(assignments[sources]), dim=-1
+    )
+    conditional_loss = -(
+        target_assignments * predicted_log_probabilities
+    ).sum(dim=-1).mean()
+    marginal = target_assignments.mean(dim=0)
+    baseline_loss = -(
+        target_assignments * torch.log(marginal.clamp_min(1e-12))
+    ).sum(dim=-1).mean()
+    raw_gain = baseline_loss - conditional_loss
+    normalized_gain = torch.where(
+        baseline_loss > 1e-8,
+        raw_gain / baseline_loss,
+        torch.zeros_like(raw_gain),
+    )
+    return {
+        "prediction_baseline_loss": float(baseline_loss.item()),
+        "prediction_conditional_loss": float(conditional_loss.item()),
+        "prediction_gain": float(raw_gain.item()),
+        "prediction_normalized_gain": float(normalized_gain.item()),
+    }
+
+
+def dmon_quality_score(
+    modularity_gain: float,
+    prediction_normalized_gain: float | None,
+    modularity_threshold: float,
+    args: argparse.Namespace,
+) -> Tuple[float, float]:
+    if prediction_normalized_gain is None or args.dmon_prediction_lambda <= 0.0:
+        return modularity_gain, modularity_threshold
+    beta = float(args.dmon_modularity_score_weight)
+    score = beta * modularity_gain + (1.0 - beta) * prediction_normalized_gain
+    threshold = (
+        beta * modularity_threshold
+        + (1.0 - beta) * args.dmon_prediction_gain_threshold
+    )
+    return score, threshold
+
+
 def dense_dmon_local_loss(
     adj: torch.Tensor,
     logits: torch.Tensor,
@@ -1328,14 +1556,15 @@ def neural_cluster_subset(
     seed: int | None = None,
     epochs: int | None = None,
     item_frequencies: np.ndarray | None = None,
-) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+    transition_pairs: LocalTransitionPairs | None = None,
+) -> Tuple[np.ndarray, List[Dict[str, float]], Dict[str, float] | None]:
     n = int(len(subset))
     if n == 0:
-        return np.empty((0,), dtype=np.int64), []
+        return np.empty((0,), dtype=np.int64), [], None
     if k <= 1:
-        return np.zeros((n,), dtype=np.int64), []
+        return np.zeros((n,), dtype=np.int64), [], None
     if n <= k:
-        return np.arange(n, dtype=np.int64), []
+        return np.arange(n, dtype=np.int64), [], None
     if n > args.max_dense_nodes:
         raise ValueError(
             f"Recursive {method} local subset has {n} nodes, above --max_dense_nodes={args.max_dense_nodes}."
@@ -1378,7 +1607,29 @@ def neural_cluster_subset(
             ).to(dtype=torch.float32)
 
     model = LocalAssignNet(x_sub.size(1), args.assign_hidden_dim, k, args.dropout).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    prediction_enabled = (
+        args.dmon_prediction_lambda > 0.0
+        and transition_pairs is not None
+        and transition_pairs.available
+    )
+    predictor = SoftAssignmentPredictor(k).to(device) if prediction_enabled else None
+    parameters = list(model.parameters())
+    if predictor is not None:
+        parameters.extend(predictor.parameters())
+    opt = torch.optim.Adam(parameters, lr=args.lr, weight_decay=args.weight_decay)
+    if prediction_enabled:
+        train_sources = torch.as_tensor(
+            transition_pairs.train_sources, dtype=torch.long, device=device
+        )
+        train_targets = torch.as_tensor(
+            transition_pairs.train_targets, dtype=torch.long, device=device
+        )
+        eval_sources = torch.as_tensor(
+            transition_pairs.eval_sources, dtype=torch.long, device=device
+        )
+        eval_targets = torch.as_tensor(
+            transition_pairs.eval_targets, dtype=torch.long, device=device
+        )
     history = []
 
     for epoch in range(1, training_epochs + 1):
@@ -1386,7 +1637,7 @@ def neural_cluster_subset(
         opt.zero_grad()
         logits = model(x_sub)
         if method == "recursive_dmon":
-            loss, metrics = dense_dmon_local_loss(
+            dmon_loss, metrics = dense_dmon_local_loss(
                 adj=adj,
                 logits=logits,
                 balance_weight=args.dmon_balance_weight,
@@ -1397,6 +1648,18 @@ def neural_cluster_subset(
                 popularity_balance_lambda=args.dmon_popularity_balance_lambda,
                 popularity_mass_objective=args.dmon_popularity_mass_objective,
             )
+            prediction_loss = logits.new_zeros(())
+            if predictor is not None:
+                assignments = F.softmax(logits, dim=-1)
+                prediction_loss = soft_next_item_prediction_loss(
+                    assignments=assignments,
+                    predictor=predictor,
+                    sources=train_sources,
+                    targets=train_targets,
+                )
+            loss = dmon_loss + args.dmon_prediction_lambda * prediction_loss
+            metrics["dmon_loss"] = dmon_loss.detach()
+            metrics["prediction_loss"] = prediction_loss.detach()
         else:
             raise ValueError(f"Unknown neural recursive method: {method}")
 
@@ -1404,7 +1667,7 @@ def neural_cluster_subset(
             raise ValueError(f"NaN loss in {method} local split")
         loss.backward()
         if args.grad_clip is not None:
-            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            nn.utils.clip_grad_norm_(parameters, args.grad_clip)
         opt.step()
 
         if epoch == 1 or epoch == training_epochs:
@@ -1413,9 +1676,28 @@ def neural_cluster_subset(
             history.append(row)
 
     model.eval()
+    if predictor is not None:
+        predictor.eval()
+    prediction_metrics = None
     with torch.no_grad():
-        labels = model(x_sub).argmax(dim=-1).cpu().numpy().astype(np.int64)
-    return labels, history
+        final_assignments = F.softmax(model(x_sub), dim=-1)
+        labels = final_assignments.argmax(dim=-1).cpu().numpy().astype(np.int64)
+        if predictor is not None:
+            prediction_metrics = evaluate_soft_next_item_prediction(
+                assignments=final_assignments,
+                predictor=predictor,
+                sources=eval_sources,
+                targets=eval_targets,
+            )
+            prediction_metrics["prediction_train_pairs"] = float(
+                train_sources.numel()
+            )
+            prediction_metrics["prediction_eval_pairs"] = float(
+                eval_sources.numel()
+            )
+            if history:
+                history[-1].update(prediction_metrics)
+    return labels, history, prediction_metrics
 
 
 def adaptive_dmon_split(
@@ -1430,8 +1712,9 @@ def adaptive_dmon_split(
     cluster_popularity: float | None = None,
     require_quality: bool = True,
     item_frequencies: np.ndarray | None = None,
+    transitions: TransitionPairs | None = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
-    """Select a local DMoN split by sweeping k and maximizing hard modularity."""
+    """Select a local DMoN split using modularity and held-out predictability."""
     n = int(len(subset))
     upper = min(int(max_branches), n - 1)
     if upper < 2:
@@ -1447,7 +1730,25 @@ def adaptive_dmon_split(
     if screening_epochs < 1:
         raise ValueError("--dmon_selection_epochs must be >= 1")
 
-    candidates: List[Tuple[int, np.ndarray, float, int]] = []
+    local_pairs = local_transition_pairs(
+        transitions=transitions,
+        subset=subset,
+        num_nodes=x_all.size(0),
+        min_cluster_size=args.dmon_prediction_min_cluster_size,
+        min_pairs=args.dmon_prediction_min_pairs,
+        max_pairs=args.dmon_prediction_max_pairs,
+        seed=seed,
+    )
+    if args.dmon_prediction_lambda > 0.0 and local_pairs is None:
+        print(
+            f"  {context}: insufficient local transitions; using modularity-only scoring",
+            flush=True,
+        )
+
+    modularity_threshold = popularity_quality_threshold(cluster_popularity, args)
+    candidates: List[
+        Tuple[int, np.ndarray, float, int, float | None, float]
+    ] = []
     history: List[Dict[str, float]] = []
     for k in range(2, upper + 1):
         print(
@@ -1455,7 +1756,7 @@ def adaptive_dmon_split(
             f"for {screening_epochs} epochs",
             flush=True,
         )
-        candidate_labels, candidate_history = neural_cluster_subset(
+        candidate_labels, candidate_history, prediction_metrics = neural_cluster_subset(
             method="recursive_dmon",
             x_all=x_all,
             A=A,
@@ -1466,16 +1767,30 @@ def adaptive_dmon_split(
             seed=seed + k * 100_003,
             epochs=screening_epochs,
             item_frequencies=item_frequencies,
+            transition_pairs=local_pairs,
         )
         for row in candidate_history:
             row["selection_screening"] = 1.0
         history.extend(candidate_history)
         children = int(len(np.unique(candidate_labels)))
         gain = local_weighted_modularity_gain(A, subset, candidate_labels)
+        prediction_gain = (
+            None
+            if prediction_metrics is None
+            else prediction_metrics["prediction_normalized_gain"]
+        )
+        quality_score, quality_threshold = dmon_quality_score(
+            modularity_gain=gain,
+            prediction_normalized_gain=prediction_gain,
+            modularity_threshold=modularity_threshold,
+            args=args,
+        )
         valid = children > 1
         print(
             f"  {context}: k={k}, children={children}, "
-            f"local_modularity_gain={gain:.6g}, valid={valid}",
+            f"local_modularity_gain={gain:.6g}, "
+            f"prediction_gain={prediction_gain if prediction_gain is not None else 'unavailable'}, "
+            f"quality_score={quality_score:.6g}, valid={valid}",
             flush=True,
         )
         history.append(
@@ -1483,10 +1798,18 @@ def adaptive_dmon_split(
                 "candidate_k": float(k),
                 "candidate_children": float(children),
                 "candidate_modularity_gain": float(gain),
+                "candidate_prediction_normalized_gain": float(
+                    prediction_gain if prediction_gain is not None else 0.0
+                ),
+                "candidate_prediction_available": float(prediction_gain is not None),
+                "candidate_quality_score": float(quality_score),
+                "candidate_quality_threshold": float(quality_threshold),
                 "candidate_valid": float(valid),
             }
         )
-        candidates.append((k, candidate_labels, gain, children))
+        candidates.append(
+            (k, candidate_labels, gain, children, prediction_gain, quality_score)
+        )
 
     valid_candidates = [candidate for candidate in candidates if candidate[3] > 1]
     if not valid_candidates:
@@ -1494,13 +1817,22 @@ def adaptive_dmon_split(
         return np.zeros(n, dtype=np.int64), history
 
     # Exact score ties prefer the simpler partition with the smaller requested k.
-    selected_k, screened_labels, screened_gain, screened_children = max(
+    (
+        selected_k,
+        screened_labels,
+        screened_gain,
+        screened_children,
+        screened_prediction_gain,
+        screened_quality_score,
+    ) = max(
         valid_candidates,
-        key=lambda candidate: (candidate[2], -candidate[0]),
+        key=lambda candidate: (candidate[5], -candidate[0]),
     )
     print(
         f"  {context}: screening selected k={selected_k}, children={screened_children}, "
-        f"local_modularity_gain={screened_gain:.6g}",
+        f"local_modularity_gain={screened_gain:.6g}, "
+        f"prediction_gain={screened_prediction_gain if screened_prediction_gain is not None else 'unavailable'}, "
+        f"quality_score={screened_quality_score:.6g}",
         flush=True,
     )
     history.append(
@@ -1508,6 +1840,15 @@ def adaptive_dmon_split(
             "screening_selected_k": float(selected_k),
             "screening_selected_children": float(screened_children),
             "screening_selected_modularity_gain": float(screened_gain),
+            "screening_selected_prediction_normalized_gain": float(
+                screened_prediction_gain
+                if screened_prediction_gain is not None
+                else 0.0
+            ),
+            "screening_selected_prediction_available": float(
+                screened_prediction_gain is not None
+            ),
+            "screening_selected_quality_score": float(screened_quality_score),
             "screening_epochs": float(screening_epochs),
         }
     )
@@ -1519,7 +1860,7 @@ def adaptive_dmon_split(
             f"for {args.recursive_epochs} epochs",
             flush=True,
         )
-        selected_labels, final_history = neural_cluster_subset(
+        selected_labels, final_history, selected_prediction_metrics = neural_cluster_subset(
             method="recursive_dmon",
             x_all=x_all,
             A=A,
@@ -1530,29 +1871,44 @@ def adaptive_dmon_split(
             seed=selected_seed,
             epochs=args.recursive_epochs,
             item_frequencies=item_frequencies,
+            transition_pairs=local_pairs,
         )
         for row in final_history:
             row["selection_screening"] = 0.0
         history.extend(final_history)
     else:
         selected_labels = screened_labels
+        selected_prediction_metrics = (
+            None
+            if screened_prediction_gain is None
+            else {"prediction_normalized_gain": screened_prediction_gain}
+        )
 
     selected_children = int(len(np.unique(selected_labels)))
     selected_gain = local_weighted_modularity_gain(A, subset, selected_labels)
+    selected_prediction_gain = (
+        None
+        if selected_prediction_metrics is None
+        else selected_prediction_metrics["prediction_normalized_gain"]
+    )
     normalized_popularity = 0.0 if cluster_popularity is None else cluster_popularity
-    modularity_threshold = popularity_quality_threshold(
-        cluster_popularity,
-        args,
+    quality_score, quality_threshold = dmon_quality_score(
+        modularity_gain=selected_gain,
+        prediction_normalized_gain=selected_prediction_gain,
+        modularity_threshold=modularity_threshold,
+        args=args,
     )
     split_accepted = (
         selected_children > 1
-        and (not require_quality or selected_gain > modularity_threshold)
+        and (not require_quality or quality_score > quality_threshold)
     )
     print(
         f"  {context}: final k={selected_k}, children={selected_children}, "
         f"local_modularity_gain={selected_gain:.6g}, "
+        f"prediction_gain={selected_prediction_gain if selected_prediction_gain is not None else 'unavailable'}, "
+        f"quality_score={quality_score:.6g}, "
         f"popularity={normalized_popularity:.6g}, "
-        f"threshold={modularity_threshold if require_quality else 'disabled'}, "
+        f"threshold={quality_threshold if require_quality else 'disabled'}, "
         f"split={'accepted' if split_accepted else 'rejected'}",
         flush=True,
     )
@@ -1561,8 +1917,16 @@ def adaptive_dmon_split(
             "selected_k": float(selected_k),
             "selected_children": float(selected_children),
             "modularity_gain": float(selected_gain),
+            "prediction_normalized_gain": float(
+                selected_prediction_gain
+                if selected_prediction_gain is not None
+                else 0.0
+            ),
+            "prediction_available": float(selected_prediction_gain is not None),
+            "quality_score": float(quality_score),
             "cluster_popularity": float(normalized_popularity),
             "modularity_threshold": float(modularity_threshold),
+            "quality_threshold": float(quality_threshold),
             "split_accepted": float(split_accepted),
         }
     )
@@ -1588,6 +1952,7 @@ def recursive_hierarchy(
     item_log_frequencies: np.ndarray | None = None,
     item_frequencies: np.ndarray | None = None,
     target_hierarchy_depths: np.ndarray | None = None,
+    transitions: TransitionPairs | None = None,
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
@@ -1758,9 +2123,19 @@ def recursive_hierarchy(
                             cluster_popularity=parent_popularity.get(parent),
                             require_quality=cluster_adaptive_depth,
                             item_frequencies=item_frequencies,
+                            transitions=transitions,
                         )
                     else:
-                        local, local_history = neural_cluster_subset(
+                        fixed_pairs = local_transition_pairs(
+                            transitions=transitions,
+                            subset=split_subset,
+                            num_nodes=n,
+                            min_cluster_size=args.dmon_prediction_min_cluster_size,
+                            min_pairs=args.dmon_prediction_min_pairs,
+                            max_pairs=args.dmon_prediction_max_pairs,
+                            seed=rng_seed + level * 1009 + int(parent),
+                        )
+                        local, local_history, fixed_prediction_metrics = neural_cluster_subset(
                             method=method,
                             x_all=x,
                             A=A,
@@ -1770,6 +2145,7 @@ def recursive_hierarchy(
                             device=device,
                             seed=rng_seed + level * 1009 + int(parent),
                             item_frequencies=item_frequencies,
+                            transition_pairs=fixed_pairs,
                         )
                 else:
                     raise ValueError(f"Unsupported recursive method: {method}")
@@ -1827,9 +2203,21 @@ def recursive_hierarchy(
                     if not split_accepted:
                         local = np.zeros(len(split_subset), dtype=np.int64)
 
-                if cluster_adaptive_depth and not adaptive_branch and method == "recursive_dmon" and k > 1:
+                if (
+                    cluster_adaptive_depth
+                    and not adaptive_branch
+                    and method == "recursive_dmon"
+                    and k > 1
+                ):
                     proposed_children = int(len(np.unique(local)))
-                    modularity_gain = local_weighted_modularity_gain(A, split_subset, local)
+                    modularity_gain = local_weighted_modularity_gain(
+                        A, split_subset, local
+                    )
+                    prediction_gain = (
+                        None
+                        if fixed_prediction_metrics is None
+                        else fixed_prediction_metrics["prediction_normalized_gain"]
+                    )
                     cluster_popularity = parent_popularity.get(parent)
                     normalized_popularity = (
                         0.0 if cluster_popularity is None else cluster_popularity
@@ -1838,15 +2226,23 @@ def recursive_hierarchy(
                         cluster_popularity,
                         args,
                     )
+                    quality_score, quality_threshold = dmon_quality_score(
+                        modularity_gain=modularity_gain,
+                        prediction_normalized_gain=prediction_gain,
+                        modularity_threshold=modularity_threshold,
+                        args=args,
+                    )
                     split_accepted = (
                         proposed_children > 1
-                        and modularity_gain > modularity_threshold
+                        and quality_score > quality_threshold
                     )
                     print(
                         f"  {split_context}: fixed k={k}, children={proposed_children}, "
                         f"local_modularity_gain={modularity_gain:.6g}, "
+                        f"prediction_gain={prediction_gain if prediction_gain is not None else 'unavailable'}, "
+                        f"quality_score={quality_score:.6g}, "
                         f"popularity={normalized_popularity:.6g}, "
-                        f"threshold={modularity_threshold:.6g}, "
+                        f"threshold={quality_threshold:.6g}, "
                         f"split={'accepted' if split_accepted else 'rejected'}",
                         flush=True,
                     )
@@ -1855,8 +2251,16 @@ def recursive_hierarchy(
                             "fixed_k": float(k),
                             "proposed_children": float(proposed_children),
                             "modularity_gain": float(modularity_gain),
+                            "prediction_normalized_gain": float(
+                                prediction_gain
+                                if prediction_gain is not None
+                                else 0.0
+                            ),
+                            "prediction_available": float(prediction_gain is not None),
+                            "quality_score": float(quality_score),
                             "cluster_popularity": float(normalized_popularity),
                             "modularity_threshold": float(modularity_threshold),
+                            "quality_threshold": float(quality_threshold),
                             "split_accepted": float(split_accepted),
                         }
                     )
@@ -2397,6 +2801,48 @@ def parse_args() -> argparse.Namespace:
         help="Short training budget for each adaptive DMoN k candidate before retraining the winner.",
     )
     parser.add_argument(
+        "--dmon_prediction_lambda",
+        type=float,
+        default=0.0,
+        help="Weight of held-in soft next-item assignment prediction loss; zero disables it.",
+    )
+    parser.add_argument(
+        "--dmon_prediction_holdout_fraction",
+        type=float,
+        default=0.2,
+        help="Fraction of training transitions reserved for split-quality scoring.",
+    )
+    parser.add_argument(
+        "--dmon_prediction_min_cluster_size",
+        type=int,
+        default=20,
+        help="Minimum parent size on which to train the sequential surrogate.",
+    )
+    parser.add_argument(
+        "--dmon_prediction_min_pairs",
+        type=int,
+        default=20,
+        help="Minimum held-in local transitions required to train the surrogate.",
+    )
+    parser.add_argument(
+        "--dmon_prediction_max_pairs",
+        type=int,
+        default=50000,
+        help="Maximum held-in and held-out local transitions per parent; zero disables sampling.",
+    )
+    parser.add_argument(
+        "--dmon_modularity_score_weight",
+        type=float,
+        default=0.5,
+        help="Beta in beta*modularity_gain + (1-beta)*normalized_prediction_gain.",
+    )
+    parser.add_argument(
+        "--dmon_prediction_gain_threshold",
+        type=float,
+        default=0.01,
+        help="Minimum normalized held-out prediction gain used in combined adaptive stopping.",
+    )
+    parser.add_argument(
         "--recursive_min_modularity_gain",
         type=float,
         default=0.0,
@@ -2674,6 +3120,7 @@ def main() -> None:
     item_log_frequencies = None
     item_frequencies = None
     target_sid_lengths = None
+    transitions = None
     if args.recursive_popularity_alpha < 0.0:
         raise ValueError("--recursive_popularity_alpha must be >= 0")
     if args.recursive_popularity_epsilon_base < 0.0:
@@ -2682,6 +3129,18 @@ def main() -> None:
         raise ValueError("--dmon_popularity_balance_lambda must be between 0 and 1")
     if args.dmon_popularity_purity_bins < 2:
         raise ValueError("--dmon_popularity_purity_bins must be at least 2")
+    if args.dmon_prediction_lambda < 0.0:
+        raise ValueError("--dmon_prediction_lambda must be >= 0")
+    if not 0.0 < args.dmon_prediction_holdout_fraction < 1.0:
+        raise ValueError("--dmon_prediction_holdout_fraction must be between 0 and 1")
+    if args.dmon_prediction_min_cluster_size < 2:
+        raise ValueError("--dmon_prediction_min_cluster_size must be >= 2")
+    if args.dmon_prediction_min_pairs < 1:
+        raise ValueError("--dmon_prediction_min_pairs must be >= 1")
+    if args.dmon_prediction_max_pairs < 0:
+        raise ValueError("--dmon_prediction_max_pairs must be >= 0")
+    if not 0.0 <= args.dmon_modularity_score_weight <= 1.0:
+        raise ValueError("--dmon_modularity_score_weight must be between 0 and 1")
     popularity_methods = {
         "recursive_dmon",
         "recursive_spectral",
@@ -2718,6 +3177,21 @@ def main() -> None:
                 f"min={args.recursive_item_depth_min}, "
                 f"max={args.recursive_item_depth_max}, counts={target_counts}"
             )
+    if args.method == "recursive_dmon" and args.dmon_prediction_lambda > 0.0:
+        transitions = load_transition_pairs(
+            interactions_path=args.interactions_path,
+            item_ids=item_ids,
+            num_items=raw_embeddings.shape[0],
+            skip_n_last=args.skip_n_last,
+            holdout_fraction=args.dmon_prediction_holdout_fraction,
+            seed=args.seed,
+        )
+        print(
+            "Loaded sequential surrogate pairs: "
+            f"train={len(transitions.train.sources)}, "
+            f"eval={len(transitions.evaluation.sources)}, "
+            f"holdout={args.dmon_prediction_holdout_fraction}"
+        )
 
     print(f"Method: {args.method}")
     if args.method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
@@ -2731,6 +3205,12 @@ def main() -> None:
             "DMoN popularity-mass objective: "
             f"{args.dmon_popularity_mass_objective}, "
             f"lambda={args.dmon_popularity_balance_lambda}"
+        )
+        print(
+            "DMoN next-item surrogate: "
+            f"lambda={args.dmon_prediction_lambda}, "
+            f"modularity_weight={args.dmon_modularity_score_weight}, "
+            f"prediction_threshold={args.dmon_prediction_gain_threshold}"
         )
     print(f"Loaded graph nodes used: {x_graph.size(0)}, edges used: {edge_index.size(1)}, emb dim: {x_graph.size(1)}")
 
@@ -2763,6 +3243,7 @@ def main() -> None:
                 if target_sid_lengths is not None
                 else None
             ),
+            transitions=transitions,
         )
         artifacts = {}
 
