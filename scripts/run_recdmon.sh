@@ -76,6 +76,12 @@ fi
 RECURSIVE_LEVELS="${RECURSIVE_LEVELS:-4}"
 RECURSIVE_BRANCH_MODE="${RECURSIVE_BRANCH_MODE:-adaptive}"
 RECURSIVE_DEPTH_MODE="${RECURSIVE_DEPTH_MODE:-adaptive}"
+RECURSIVE_ITEM_DEPTH_FUNCTION="${RECURSIVE_ITEM_DEPTH_FUNCTION:-sigmoid}"
+RECURSIVE_ITEM_DEPTH_MIN="${RECURSIVE_ITEM_DEPTH_MIN:-4}"
+RECURSIVE_ITEM_DEPTH_MAX="${RECURSIVE_ITEM_DEPTH_MAX:-10}"
+RECURSIVE_ITEM_DEPTH_ALPHA="${RECURSIVE_ITEM_DEPTH_ALPHA:-1.0}"
+RECURSIVE_ITEM_DEPTH_BETA="${RECURSIVE_ITEM_DEPTH_BETA:-5.0}"
+RECURSIVE_ITEM_DEPTH_GAMMA="${RECURSIVE_ITEM_DEPTH_GAMMA:-1.0}"
 RECURSIVE_POPULARITY_EPSILON_BASE="${RECURSIVE_POPULARITY_EPSILON_BASE:-0.001}"
 RECURSIVE_POPULARITY_ALPHA="${RECURSIVE_POPULARITY_ALPHA:-0}"
 DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
@@ -93,9 +99,16 @@ case "${RECURSIVE_BRANCH_MODE}" in
     ;;
 esac
 case "${RECURSIVE_DEPTH_MODE}" in
-  adaptive|fixed) ;;
+  adaptive|item|fixed) ;;
   *)
-    echo "Unsupported RECURSIVE_DEPTH_MODE='${RECURSIVE_DEPTH_MODE}'. Choose adaptive or fixed." >&2
+    echo "Unsupported RECURSIVE_DEPTH_MODE='${RECURSIVE_DEPTH_MODE}'. Choose adaptive, item, or fixed." >&2
+    exit 2
+    ;;
+esac
+case "${RECURSIVE_ITEM_DEPTH_FUNCTION}" in
+  sigmoid|linear) ;;
+  *)
+    echo "Unsupported RECURSIVE_ITEM_DEPTH_FUNCTION='${RECURSIVE_ITEM_DEPTH_FUNCTION}'. Choose sigmoid or linear." >&2
     exit 2
     ;;
 esac
@@ -188,6 +201,17 @@ for SEED in "${SEEDS[@]}"; do
     fi
     if [[ "${RECURSIVE_DEPTH_MODE}" == "fixed" ]]; then
       MODE_LABEL="${MODE_LABEL}_l${RECURSIVE_LEVELS}"
+    elif [[ "${RECURSIVE_DEPTH_MODE}" == "item" ]]; then
+      ITEM_DEPTH_MIN_LABEL="${RECURSIVE_ITEM_DEPTH_MIN//./p}"
+      ITEM_DEPTH_MAX_LABEL="${RECURSIVE_ITEM_DEPTH_MAX//./p}"
+      if [[ "${RECURSIVE_ITEM_DEPTH_FUNCTION}" == "sigmoid" ]]; then
+        ITEM_DEPTH_ALPHA_LABEL="${RECURSIVE_ITEM_DEPTH_ALPHA//./p}"
+        ITEM_DEPTH_BETA_LABEL="${RECURSIVE_ITEM_DEPTH_BETA//./p}"
+        MODE_LABEL="${MODE_LABEL}_sig${ITEM_DEPTH_ALPHA_LABEL}b${ITEM_DEPTH_BETA_LABEL}_min${ITEM_DEPTH_MIN_LABEL}_max${ITEM_DEPTH_MAX_LABEL}"
+      else
+        ITEM_DEPTH_GAMMA_LABEL="${RECURSIVE_ITEM_DEPTH_GAMMA//./p}"
+        MODE_LABEL="${MODE_LABEL}_lin${ITEM_DEPTH_GAMMA_LABEL}_min${ITEM_DEPTH_MIN_LABEL}_max${ITEM_DEPTH_MAX_LABEL}"
+      fi
     fi
     if [[ -n "${CLUSTERING_LABEL}" ]]; then
       CLUSTERING_LABEL="${CLUSTERING_LABEL}_${MODE_LABEL}"
@@ -252,7 +276,7 @@ for SEED in "${SEEDS[@]}"; do
   CLUSTERING_ARGS=(--method "${CLUSTERING_METHOD}")
   SID_INDEX_ARGS=()
   MAPPER_VARIABLE_LENGTH_ARG=""
-  if [[ "${CLUSTERING_METHOD}" == "recursive_leiden" || "${RECURSIVE_DEPTH_MODE}" == "adaptive" && ( "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" || "${CLUSTERING_METHOD}" == "recursive_kmeans" ) ]]; then
+  if [[ "${CLUSTERING_METHOD}" == "recursive_leiden" || "${RECURSIVE_DEPTH_MODE}" != "fixed" && ( "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" || "${CLUSTERING_METHOD}" == "recursive_kmeans" ) ]]; then
     SID_INDEX_ARGS+=(--variable_length)
     MAPPER_VARIABLE_LENGTH_ARG="--variable_length_sids"
   fi
@@ -263,6 +287,16 @@ for SEED in "${SEEDS[@]}"; do
       --recursive_factor "${RECURSIVE_FACTOR}"
       --recursive_levels "${RECURSIVE_LEVELS}"
     )
+    if [[ "${RECURSIVE_DEPTH_MODE}" == "item" ]]; then
+      CLUSTERING_ARGS+=(
+        --recursive_item_depth_function "${RECURSIVE_ITEM_DEPTH_FUNCTION}"
+        --recursive_item_depth_min "${RECURSIVE_ITEM_DEPTH_MIN}"
+        --recursive_item_depth_max "${RECURSIVE_ITEM_DEPTH_MAX}"
+        --recursive_item_depth_alpha "${RECURSIVE_ITEM_DEPTH_ALPHA}"
+        --recursive_item_depth_beta "${RECURSIVE_ITEM_DEPTH_BETA}"
+        --recursive_item_depth_gamma "${RECURSIVE_ITEM_DEPTH_GAMMA}"
+      )
+    fi
   fi
   if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" || "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_leiden" || "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_ARGS+=(

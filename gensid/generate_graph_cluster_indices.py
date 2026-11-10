@@ -143,6 +143,21 @@ def load_cluster_label_levels(
     return out_names, out_arrays
 
 
+def load_item_target_sid_lengths(labels_path: str) -> np.ndarray | None:
+    """Load explicit per-item final SID lengths when the clustering wrote them."""
+    with open(labels_path, "r") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict) or "item_target_sid_lengths" not in payload:
+        return None
+    target_lengths = np.asarray(payload["item_target_sid_lengths"], dtype=np.int64)
+    if target_lengths.ndim != 1:
+        raise ValueError(
+            "item_target_sid_lengths must be a one-dimensional array, "
+            f"got shape {target_lengths.shape}"
+        )
+    return target_lengths
+
+
 def make_contiguous_per_level(labels: list[np.ndarray], keep_negative: bool = True) -> tuple[list[np.ndarray], list[dict[int, int]]]:
     """Remap arbitrary cluster ids to compact 0..K-1 ids per level."""
     remapped = []
@@ -489,7 +504,30 @@ def main():
         labels, remap_maps = make_contiguous_per_level(labels, keep_negative=True)
 
     prefixes = args.prefixes if args.prefixes is not None else make_default_prefixes(len(labels))
-    effective_lengths = infer_effective_lengths(labels) if args.variable_length else None
+    effective_lengths = None
+    effective_length_source = None
+    if args.variable_length:
+        target_sid_lengths = load_item_target_sid_lengths(args.labels_path)
+        if target_sid_lengths is not None:
+            if len(target_sid_lengths) != len(labels[0]):
+                raise ValueError(
+                    "item_target_sid_lengths and label vectors must contain the same "
+                    f"number of items, got {len(target_sid_lengths)} and {len(labels[0])}"
+                )
+            effective_lengths = target_sid_lengths - 1
+            if np.any(effective_lengths < 1):
+                raise ValueError(
+                    "Every explicit target SID length must reserve at least one hierarchy "
+                    "token and one terminal unique-leaf token"
+                )
+            if np.any(effective_lengths > len(labels)):
+                raise ValueError(
+                    "Explicit target SID lengths require more hierarchy levels than were loaded"
+                )
+            effective_length_source = "item_target_sid_lengths"
+        else:
+            effective_lengths = infer_effective_lengths(labels)
+            effective_length_source = "inferred_branch_stopping"
 
     codes = build_codes(
         labels=labels,
@@ -513,6 +551,7 @@ def main():
             "num_levels": len(level_names),
             "append_unique_leaf": bool(args.append_unique_leaf),
             "variable_length": bool(args.variable_length),
+            "effective_length_source": effective_length_source,
             "unclustered_strategy": args.unclustered_strategy,
             "level_cluster_counts_excluding_minus1": {
                 name: int(len(set(map(int, arr[arr >= 0])))) for name, arr in zip(level_names, labels)

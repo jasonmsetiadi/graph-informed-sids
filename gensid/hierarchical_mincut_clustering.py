@@ -21,7 +21,9 @@ Graph-embedding KMeans sweeps k >= 2 and selects the best embedding-space
 silhouette score, without constructing an additional graph.
 
 Branch-count selection and hierarchy depth are controlled independently by
---recursive_branch_mode and --recursive_depth_mode.
+--recursive_branch_mode and --recursive_depth_mode. Item-level depth maps each
+training interaction count to an exact final SID length and excludes an item
+from deeper clustering as soon as it reaches that target.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
 from a log-spaced scan. The number of children and hierarchy depth are determined
@@ -194,6 +196,41 @@ def load_item_frequencies(
             frequencies[item_id] += 1
 
     return frequencies[item_ids].astype(np.float64)
+
+
+def item_target_sid_lengths(
+    item_frequencies: np.ndarray,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    """Map each item's training frequency to an exact final SID length."""
+    depth_min = int(args.recursive_item_depth_min)
+    depth_max = int(args.recursive_item_depth_max)
+    if depth_min < 2:
+        raise ValueError("--recursive_item_depth_min must be at least 2")
+    if depth_max < depth_min:
+        raise ValueError(
+            "--recursive_item_depth_max must be >= --recursive_item_depth_min"
+        )
+
+    log_counts = np.log1p(np.asarray(item_frequencies, dtype=np.float64))
+    if args.recursive_item_depth_function == "sigmoid":
+        if args.recursive_item_depth_alpha < 0.0:
+            raise ValueError("--recursive_item_depth_alpha must be >= 0")
+        logits = (
+            -args.recursive_item_depth_alpha * log_counts
+            + args.recursive_item_depth_beta
+        )
+        sigmoid = 1.0 / (1.0 + np.exp(-np.clip(logits, -60.0, 60.0)))
+        continuous = depth_min + (depth_max - depth_min) * sigmoid
+    else:
+        if args.recursive_item_depth_gamma < 0.0:
+            raise ValueError("--recursive_item_depth_gamma must be >= 0")
+        continuous = depth_max - args.recursive_item_depth_gamma * log_counts
+
+    # Round halves upward, then enforce the requested final SID-length range.
+    return np.clip(
+        np.floor(continuous + 0.5), depth_min, depth_max
+    ).astype(np.int64)
 
 
 def load_item_log_frequencies(
@@ -375,6 +412,7 @@ def save_outputs(
     metadata_extra: Dict[str, Any] | None = None,
     history: List[Dict[str, float]] | None = None,
     artifacts: Dict[str, np.ndarray] | None = None,
+    target_sid_lengths: np.ndarray | None = None,
 ) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -399,6 +437,15 @@ def save_outputs(
             for i, labels in enumerate(graph_labels_coarse_to_fine, start=1)
         },
     }
+    if target_sid_lengths is not None:
+        if target_sid_lengths.shape != (num_items,):
+            raise ValueError(
+                f"target_sid_lengths must have shape ({num_items},), "
+                f"got {target_sid_lengths.shape}"
+            )
+        labels_json["item_target_sid_lengths"] = (
+            target_sid_lengths.astype(np.int64).tolist()
+        )
 
     labels_path = output_dir / f"{prefix}_labels.json"
     with open(labels_path, "w") as f:
@@ -471,6 +518,29 @@ def save_outputs(
                 metadata["recursive_factor_max"] = int(args.recursive_factor)
             if args.recursive_depth_mode == "fixed":
                 metadata["recursive_levels"] = int(args.recursive_levels)
+            elif args.recursive_depth_mode == "item":
+                if target_sid_lengths is None:
+                    raise ValueError(
+                        "Item-level depth metadata requires explicit target SID lengths"
+                    )
+                metadata.update(
+                    {
+                        "recursive_item_depth_function": args.recursive_item_depth_function,
+                        "recursive_item_depth_min": int(args.recursive_item_depth_min),
+                        "recursive_item_depth_max": int(args.recursive_item_depth_max),
+                        "recursive_item_depth_alpha": float(args.recursive_item_depth_alpha),
+                        "recursive_item_depth_beta": float(args.recursive_item_depth_beta),
+                        "recursive_item_depth_gamma": float(args.recursive_item_depth_gamma),
+                        "recursive_item_depth_counts": {
+                            str(depth): int(np.count_nonzero(target_sid_lengths == depth))
+                            for depth in np.unique(target_sid_lengths)
+                        },
+                        "recursive_item_depth_includes_unique_leaf": True,
+                        "recursive_hierarchy_levels": int(
+                            len(graph_labels_coarse_to_fine)
+                        ),
+                    }
+                )
             else:
                 metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
             if args.recursive_branch_mode == "adaptive" and args.method in {"recursive_spectral", "recursive_dmon"}:
@@ -1517,15 +1587,28 @@ def recursive_hierarchy(
     device: torch.device,
     item_log_frequencies: np.ndarray | None = None,
     item_frequencies: np.ndarray | None = None,
+    target_hierarchy_depths: np.ndarray | None = None,
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
     adaptive_branch = args.recursive_branch_mode == "adaptive"
-    adaptive_depth = args.recursive_depth_mode == "adaptive" and method in {
+    cluster_adaptive_depth = args.recursive_depth_mode == "adaptive" and method in {
         "recursive_spectral",
         "recursive_dmon",
         "recursive_kmeans",
     }
+    item_adaptive_depth = args.recursive_depth_mode == "item" and method in {
+        "recursive_spectral",
+        "recursive_dmon",
+        "recursive_kmeans",
+    }
+    adaptive_depth = cluster_adaptive_depth or item_adaptive_depth
+    if item_adaptive_depth:
+        if target_hierarchy_depths is None or target_hierarchy_depths.shape != (x.size(0),):
+            raise ValueError(
+                "Item-level depth requires one target hierarchy depth per graph node"
+            )
+        max_target_depth = int(target_hierarchy_depths.max())
     if not adaptive_depth and levels < 1:
         raise ValueError("--recursive_levels must be >= 1")
 
@@ -1578,7 +1661,9 @@ def recursive_hierarchy(
     rng_seed = int(args.seed)
 
     level = 1
-    while adaptive_depth or level <= levels:
+    while (item_adaptive_depth and level <= max_target_depth) or (
+        not item_adaptive_depth and (adaptive_depth or level <= levels)
+    ):
         new_labels = np.full(n, -1, dtype=np.int64)
         next_cluster_id = 0
         parents = [p for p in np.unique(parent_labels).tolist() if p >= 0]
@@ -1592,22 +1677,31 @@ def recursive_hierarchy(
 
         for parent in parents:
             subset = np.where(parent_labels == parent)[0].astype(np.int64)
+            if item_adaptive_depth:
+                split_subset = subset[target_hierarchy_depths[subset] >= level]
+                stopped_subset = subset[target_hierarchy_depths[subset] < level]
+            else:
+                split_subset = subset
+                stopped_subset = np.empty(0, dtype=np.int64)
             if parent not in active_parents:
-                local = np.zeros(len(subset), dtype=np.int64)
+                local = np.zeros(len(split_subset), dtype=np.int64)
+                local_history = []
+            elif len(split_subset) <= 1:
+                local = np.zeros(len(split_subset), dtype=np.int64)
                 local_history = []
             else:
                 split_context = f"{method} level {level}, parent {parent}"
                 if not adaptive_branch:
-                    k = min(factor, len(subset))
+                    k = min(factor, len(split_subset))
                 elif method == "recursive_spectral":
                     k = adaptive_branch_count(
                         A,
-                        subset,
+                        split_subset,
                         factor,
                         context=split_context,
                     )
-                    if not adaptive_depth and k <= 1 and len(subset) > 1:
-                        k = min(2, factor, len(subset))
+                    if not adaptive_depth and k <= 1 and len(split_subset) > 1:
+                        k = min(2, factor, len(split_subset))
                         print(
                             f"  {split_context}: fixed depth forces fallback k={k}",
                             flush=True,
@@ -1618,7 +1712,7 @@ def recursive_hierarchy(
                         A=A,
                         A_embedding=A_embedding,
                         fusion_alpha=args.spectral_fusion_alpha,
-                        subset=subset,
+                        subset=split_subset,
                         k=k,
                         seed=rng_seed + level * 1009 + int(parent),
                     )
@@ -1632,7 +1726,7 @@ def recursive_hierarchy(
                         )
                         local, local_history = adaptive_kmeans_split(
                             graph_embeddings=graph_embeddings,
-                            subset=subset,
+                            subset=split_subset,
                             max_branches=factor,
                             min_silhouette=silhouette_threshold,
                             min_child_size=args.recursive_kmeans_min_child_size,
@@ -1640,12 +1734,12 @@ def recursive_hierarchy(
                             seed=rng_seed + level * 1009 + int(parent),
                             context=split_context,
                             cluster_popularity=cluster_popularity,
-                            require_quality=adaptive_depth,
+                            require_quality=cluster_adaptive_depth,
                         )
                     else:
                         local = embedding_cluster_subset(
                             graph_embeddings=graph_embeddings,
-                            subset=subset,
+                            subset=split_subset,
                             k=k,
                             seed=rng_seed + level * 1009 + int(parent),
                         )
@@ -1655,14 +1749,14 @@ def recursive_hierarchy(
                         local, local_history = adaptive_dmon_split(
                             x_all=x,
                             A=A,
-                            subset=subset,
+                            subset=split_subset,
                             max_branches=factor,
                             args=args,
                             device=device,
                             seed=rng_seed + level * 1009 + int(parent),
                             context=split_context,
                             cluster_popularity=parent_popularity.get(parent),
-                            require_quality=adaptive_depth,
+                            require_quality=cluster_adaptive_depth,
                             item_frequencies=item_frequencies,
                         )
                     else:
@@ -1670,7 +1764,7 @@ def recursive_hierarchy(
                             method=method,
                             x_all=x,
                             A=A,
-                            subset=subset,
+                            subset=split_subset,
                             k=k,
                             args=args,
                             device=device,
@@ -1680,7 +1774,7 @@ def recursive_hierarchy(
                 else:
                     raise ValueError(f"Unsupported recursive method: {method}")
 
-                if adaptive_depth and not adaptive_branch and method == "recursive_kmeans" and k > 1:
+                if cluster_adaptive_depth and not adaptive_branch and method == "recursive_kmeans" and k > 1:
                     child_sizes = np.bincount(local, minlength=k)
                     proposed_children = int(np.count_nonzero(child_sizes))
                     smallest_child = int(child_sizes.min())
@@ -1692,7 +1786,7 @@ def recursive_hierarchy(
                     if valid:
                         try:
                             silhouette = sampled_silhouette_score(
-                                features=graph_embeddings[subset],
+                                features=graph_embeddings[split_subset],
                                 labels=local,
                                 sample_size=args.recursive_kmeans_silhouette_sample_size,
                                 seed=rng_seed + level * 1009 + int(parent),
@@ -1731,11 +1825,11 @@ def recursive_hierarchy(
                         }
                     )
                     if not split_accepted:
-                        local = np.zeros(len(subset), dtype=np.int64)
+                        local = np.zeros(len(split_subset), dtype=np.int64)
 
-                if adaptive_depth and not adaptive_branch and method == "recursive_dmon" and k > 1:
+                if cluster_adaptive_depth and not adaptive_branch and method == "recursive_dmon" and k > 1:
                     proposed_children = int(len(np.unique(local)))
-                    modularity_gain = local_weighted_modularity_gain(A, subset, local)
+                    modularity_gain = local_weighted_modularity_gain(A, split_subset, local)
                     cluster_popularity = parent_popularity.get(parent)
                     normalized_popularity = (
                         0.0 if cluster_popularity is None else cluster_popularity
@@ -1767,11 +1861,11 @@ def recursive_hierarchy(
                         }
                     )
                     if not split_accepted:
-                        local = np.zeros(len(subset), dtype=np.int64)
+                        local = np.zeros(len(split_subset), dtype=np.int64)
 
-                if adaptive_depth and method == "recursive_spectral" and k > 1:
+                if cluster_adaptive_depth and method == "recursive_spectral" and k > 1:
                     proposed_children = int(len(np.unique(local)))
-                    modularity_gain = local_weighted_modularity_gain(A, subset, local)
+                    modularity_gain = local_weighted_modularity_gain(A, split_subset, local)
                     cluster_popularity = parent_popularity.get(parent)
                     normalized_popularity = (
                         0.0 if cluster_popularity is None else cluster_popularity
@@ -1803,16 +1897,26 @@ def recursive_hierarchy(
                         }
                     )
                     if not split_accepted:
-                        local = np.zeros(len(subset), dtype=np.int64)
+                        local = np.zeros(len(split_subset), dtype=np.int64)
 
             local_ids = sorted(np.unique(local).tolist())
-            parent_split = len(local_ids) > 1
+            parent_split = len(local_ids) > 1 or (
+                len(stopped_subset) > 0 and len(split_subset) > 0
+            )
             any_split = any_split or parent_split
+
+            if len(stopped_subset) > 0:
+                new_labels[stopped_subset] = next_cluster_id
+                next_cluster_id += 1
 
             for local_id in local_ids:
                 mask = local == local_id
-                new_labels[subset[mask]] = next_cluster_id
-                if parent_split and int(mask.sum()) > 1:
+                child_items = split_subset[mask]
+                new_labels[child_items] = next_cluster_id
+                if item_adaptive_depth:
+                    if np.any(target_hierarchy_depths[child_items] > level):
+                        next_active_parents.add(next_cluster_id)
+                elif parent_split and int(mask.sum()) > 1:
                     next_active_parents.add(next_cluster_id)
                 next_cluster_id += 1
 
@@ -1823,7 +1927,7 @@ def recursive_hierarchy(
                 history.append(row)
 
         new_labels = relabel_compact(new_labels)
-        if adaptive_depth and not any_split:
+        if cluster_adaptive_depth and not any_split:
             if not hierarchy:
                 hierarchy.append(new_labels)
                 print(f"{method} stopped at root: clusters=1")
@@ -2250,18 +2354,42 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--recursive_depth_mode",
-        choices=["adaptive", "fixed"],
+        choices=["adaptive", "item", "fixed"],
         default="adaptive",
-        help="Stop branches by split quality or run exactly --recursive_levels levels.",
+        help=(
+            "Stop clusters by split quality, stop each item at its popularity-derived "
+            "target SID length, or run exactly --recursive_levels levels."
+        ),
     )
     parser.add_argument("--recursive_factor", type=int, default=4, help="Maximum child clusters per parent for recursive methods.")
     parser.add_argument(
         "--recursive_levels",
         type=int,
         default=2,
-        help="Exact hierarchy depth in fixed mode; adaptive mode stops naturally.",
+        help="Exact hierarchy depth in fixed mode; ignored by adaptive and item modes.",
     )
     parser.add_argument("--recursive_epochs", type=int, default=100)
+    parser.add_argument(
+        "--recursive_item_depth_function",
+        choices=["sigmoid", "linear"],
+        default="sigmoid",
+        help="Popularity-to-SID-length function used when --recursive_depth_mode=item.",
+    )
+    parser.add_argument(
+        "--recursive_item_depth_min",
+        type=int,
+        default=4,
+        help="Minimum final SID length, including the terminal unique-leaf token.",
+    )
+    parser.add_argument(
+        "--recursive_item_depth_max",
+        type=int,
+        default=10,
+        help="Maximum final SID length, including the terminal unique-leaf token.",
+    )
+    parser.add_argument("--recursive_item_depth_alpha", type=float, default=1.0)
+    parser.add_argument("--recursive_item_depth_beta", type=float, default=5.0)
+    parser.add_argument("--recursive_item_depth_gamma", type=float, default=1.0)
     parser.add_argument(
         "--dmon_selection_epochs",
         type=int,
@@ -2521,6 +2649,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.recursive_depth_mode == "item" and args.method not in {
+        "recursive_spectral",
+        "recursive_dmon",
+        "recursive_kmeans",
+    }:
+        raise ValueError(
+            "--recursive_depth_mode=item is supported by recursive_spectral, "
+            "recursive_dmon, and recursive_kmeans"
+        )
     graph_building_kwargs = json.loads(args.graph_building_kwargs)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -2536,6 +2673,7 @@ def main() -> None:
     args.input_has_edge_weight = edge_weight is not None
     item_log_frequencies = None
     item_frequencies = None
+    target_sid_lengths = None
     if args.recursive_popularity_alpha < 0.0:
         raise ValueError("--recursive_popularity_alpha must be >= 0")
     if args.recursive_popularity_epsilon_base < 0.0:
@@ -2551,12 +2689,13 @@ def main() -> None:
         "recursive_leiden",
     }
     if args.method in popularity_methods:
-        item_frequencies = load_item_frequencies(
+        all_item_frequencies = load_item_frequencies(
             interactions_path=args.interactions_path,
-            item_ids=item_ids,
+            item_ids=np.arange(raw_embeddings.shape[0], dtype=np.int64),
             num_items=raw_embeddings.shape[0],
             skip_n_last=args.skip_n_last,
         )
+        item_frequencies = all_item_frequencies[item_ids]
         item_log_frequencies = np.log1p(item_frequencies)
         args.dmon_popularity_bin_ids = rank_quantile_bins(
             item_frequencies, args.dmon_popularity_purity_bins
@@ -2567,6 +2706,18 @@ def main() -> None:
             f"alpha={args.recursive_popularity_alpha}, "
             "normalization=per_level_minmax_parent_mean_log_frequency"
         )
+        if args.recursive_depth_mode == "item":
+            target_sid_lengths = item_target_sid_lengths(all_item_frequencies, args)
+            target_counts = {
+                int(depth): int(np.count_nonzero(target_sid_lengths == depth))
+                for depth in np.unique(target_sid_lengths)
+            }
+            print(
+                "Item-level target SID lengths: "
+                f"function={args.recursive_item_depth_function}, "
+                f"min={args.recursive_item_depth_min}, "
+                f"max={args.recursive_item_depth_max}, counts={target_counts}"
+            )
 
     print(f"Method: {args.method}")
     if args.method in {"recursive_spectral", "recursive_dmon", "recursive_kmeans"}:
@@ -2607,6 +2758,11 @@ def main() -> None:
             device=device,
             item_log_frequencies=item_log_frequencies,
             item_frequencies=item_frequencies,
+            target_hierarchy_depths=(
+                target_sid_lengths[item_ids] - 1
+                if target_sid_lengths is not None
+                else None
+            ),
         )
         artifacts = {}
 
@@ -2618,6 +2774,7 @@ def main() -> None:
         edge_index=edge_index,
         history=history,
         artifacts=artifacts,
+        target_sid_lengths=target_sid_lengths,
     )
 
 
