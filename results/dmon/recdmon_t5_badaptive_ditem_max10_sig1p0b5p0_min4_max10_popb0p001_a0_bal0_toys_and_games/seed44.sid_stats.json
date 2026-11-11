@@ -1,0 +1,144 @@
+{
+  "num_items": 11924,
+  "num_unique_sids": 11924,
+  "num_colliding_items": 0,
+  "collision_rate": 0.0,
+  "max_collision_group_size": 1,
+  "labels_path": "cache/gensid/mincut_runs/RecDMoN_t5_badaptive_ditem_max10_sig1p0b5p0_min4_max10_popb0p001_a0_bal0_Toys_and_Games_seed44/graph_hierarchy_labels.json",
+  "label_group": "coarse_to_fine_item_labels",
+  "levels": [
+    "level_1",
+    "level_2",
+    "level_3",
+    "level_4",
+    "level_5",
+    "level_6",
+    "level_7",
+    "level_8",
+    "level_9"
+  ],
+  "num_levels": 9,
+  "append_unique_leaf": true,
+  "variable_length": true,
+  "effective_length_source": "item_target_sid_lengths",
+  "unclustered_strategy": "special",
+  "level_cluster_counts_excluding_minus1": {
+    "level_1": 4,
+    "level_2": 16,
+    "level_3": 59,
+    "level_4": 265,
+    "level_5": 1004,
+    "level_6": 2781,
+    "level_7": 4704,
+    "level_8": 5727,
+    "level_9": 7116
+  },
+  "level_unclustered_counts": {
+    "level_1": 48,
+    "level_2": 48,
+    "level_3": 48,
+    "level_4": 48,
+    "level_5": 48,
+    "level_6": 48,
+    "level_7": 48,
+    "level_8": 48,
+    "level_9": 48
+  },
+  "length": {
+    "mean_uniform": 9.746729285474673,
+    "mean_unigram": 9.247784861733438
+  },
+  "popularity_length": {
+    "pop_stats_by_length": {
+      "6": {
+        "count": 1,
+        "pop_mean": 215.0,
+        "pop_median": 215.0,
+        "pop_std": NaN,
+        "pop_min": 215.0,
+        "pop_max": 215.0,
+        "count_head": 1,
+        "count_middle": 0,
+        "count_longtail": 0,
+        "pct_head": 0.041928721174004195,
+        "pct_middle": 0.0,
+        "pct_longtail": 0.0
+      },
+      "7": {
+        "count": 27,
+        "pop_mean": 135.96296296296296,
+        "pop_median": 130.0,
+        "pop_std": 22.164561946219607,
+        "pop_min": 106.0,
+        "pop_max": 176.0,
+        "count_head": 27,
+        "count_middle": 0,
+        "count_longtail": 0,
+        "pct_head": 1.1320754716981132,
+        "pct_middle": 0.0,
+        "pct_longtail": 0.0
+      },
+      "8": {
+        "count": 205,
+        "pop_mean": 67.54634146341463,
+        "pop_median": 63.0,
+        "pop_std": 15.967922771228862,
+        "pop_min": 49.0,
+        "pop_max": 105.0,
+        "count_head": 205,
+        "count_middle": 0,
+        "count_longtail": 0,
+        "pct_head": 8.59538784067086,
+        "pct_middle": 0.0,
+        "pct_longtail": 0.0
+      },
+      "9": {
+        "count": 2525,
+        "pop_mean": 22.692277227722773,
+        "pop_median": 20.0,
+        "pop_std": 8.785430856095493,
+        "pop_min": 13.0,
+        "pop_max": 48.0,
+        "count_head": 2152,
+        "count_middle": 373,
+        "count_longtail": 0,
+        "pct_head": 90.23060796645703,
+        "pct_middle": 5.213866368465195,
+        "pct_longtail": 0.0
+      },
+      "10": {
+        "count": 9166,
+        "pop_mean": 5.863190050185468,
+        "pop_median": 5.0,
+        "pop_std": 2.641488618042995,
+        "pop_min": 0.0,
+        "pop_max": 12.0,
+        "count_head": 0,
+        "count_middle": 6781,
+        "count_longtail": 2385,
+        "pct_head": 0.0,
+        "pct_middle": 94.78613363153481,
+        "pct_longtail": 100.0
+      }
+    }
+  },
+  "head_longtail": {
+    "mean_length_head": 8.890146750524108,
+    "mean_length_middle": 9.947861336315349,
+    "mean_length_longtail": 10.0,
+    "count_head": 2385,
+    "count_middle": 7154,
+    "count_longtail": 2385
+  },
+  "sid_length_min": 6,
+  "sid_length_max": 10,
+  "sid_length_mean": 9.746729285474673,
+  "sid_length_histogram": {
+    "6": 1,
+    "7": 27,
+    "8": 205,
+    "9": 2525,
+    "10": 9166
+  },
+  "reindex_contiguous": false
+}
