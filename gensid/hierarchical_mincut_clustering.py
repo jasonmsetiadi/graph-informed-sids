@@ -2822,13 +2822,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recursive_item_depth_min",
         type=int,
-        default=4,
+        default=2,
         help="Minimum number of hierarchy levels, excluding the unique-leaf token.",
     )
     parser.add_argument(
         "--recursive_item_depth_max",
         type=int,
-        default=10,
+        default=8,
         help="Maximum number of hierarchy levels, excluding the unique-leaf token.",
     )
     parser.add_argument("--recursive_item_depth_alpha", type=float, default=1.0)
