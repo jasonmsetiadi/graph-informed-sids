@@ -1615,6 +1615,7 @@ def recursive_hierarchy(
     item_log_frequencies: np.ndarray | None = None,
     item_frequencies: np.ndarray | None = None,
     target_hierarchy_depths: np.ndarray | None = None,
+    required_hierarchy_depth: int | None = None,
 ) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
@@ -1636,6 +1637,10 @@ def recursive_hierarchy(
                 "Item-level depth requires one target hierarchy depth per graph node"
             )
         max_target_depth = int(target_hierarchy_depths.max())
+        if required_hierarchy_depth is not None:
+            if required_hierarchy_depth < 1:
+                raise ValueError("required_hierarchy_depth must be at least 1")
+            max_target_depth = max(max_target_depth, int(required_hierarchy_depth))
     if not adaptive_depth and levels < 1:
         raise ValueError("--recursive_levels must be >= 1")
 
@@ -2799,6 +2804,11 @@ def main() -> None:
             item_frequencies=item_frequencies,
             target_hierarchy_depths=(
                 target_sid_lengths[item_ids] - 1
+                if target_sid_lengths is not None
+                else None
+            ),
+            required_hierarchy_depth=(
+                int(target_sid_lengths.max()) - 1
                 if target_sid_lengths is not None
                 else None
             ),
