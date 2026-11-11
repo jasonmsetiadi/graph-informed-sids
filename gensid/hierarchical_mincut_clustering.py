@@ -22,7 +22,7 @@ silhouette score, without constructing an additional graph.
 
 Branch-count selection and hierarchy depth are controlled independently by
 --recursive_branch_mode and --recursive_depth_mode. Item-level depth maps each
-training interaction count to an exact final SID length and excludes an item
+training interaction count to an exact hierarchy depth and excludes an item
 from deeper clustering as soon as it reaches that target.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
@@ -198,15 +198,15 @@ def load_item_frequencies(
     return frequencies[item_ids].astype(np.float64)
 
 
-def item_target_sid_lengths(
+def item_target_hierarchy_depths(
     item_frequencies: np.ndarray,
     args: argparse.Namespace,
 ) -> np.ndarray:
-    """Map dataset-normalized log training frequency to an exact SID length."""
+    """Map dataset-normalized log training frequency to a hierarchy depth."""
     depth_min = int(args.recursive_item_depth_min)
     depth_max = int(args.recursive_item_depth_max)
-    if depth_min < 2:
-        raise ValueError("--recursive_item_depth_min must be at least 2")
+    if depth_min < 1:
+        raise ValueError("--recursive_item_depth_min must be at least 1")
     if depth_max < depth_min:
         raise ValueError(
             "--recursive_item_depth_max must be >= --recursive_item_depth_min"
@@ -251,7 +251,7 @@ def item_target_sid_lengths(
 
     continuous = depth_min + (depth_max - depth_min) * scaled
 
-    # Round halves upward, then enforce the requested final SID-length range.
+    # Round halves upward, then enforce the requested hierarchy-depth range.
     return np.clip(
         np.floor(continuous + 0.5), depth_min, depth_max
     ).astype(np.int64)
@@ -556,10 +556,18 @@ def save_outputs(
                         "recursive_item_depth_beta": float(args.recursive_item_depth_beta),
                         "recursive_item_depth_gamma": float(args.recursive_item_depth_gamma),
                         "recursive_item_depth_counts": {
-                            str(depth): int(np.count_nonzero(target_sid_lengths == depth))
-                            for depth in np.unique(target_sid_lengths)
+                            str(depth): int(
+                                np.count_nonzero(target_sid_lengths - 1 == depth)
+                            )
+                            for depth in np.unique(target_sid_lengths - 1)
                         },
-                        "recursive_item_depth_includes_unique_leaf": True,
+                        "recursive_item_final_sid_length_counts": {
+                            str(length): int(
+                                np.count_nonzero(target_sid_lengths == length)
+                            )
+                            for length in np.unique(target_sid_lengths)
+                        },
+                        "recursive_item_depth_includes_unique_leaf": False,
                         "recursive_item_depth_popularity_normalization": (
                             "dataset_minmax_log1p_training_interaction_count"
                         ),
@@ -2405,19 +2413,19 @@ def parse_args() -> argparse.Namespace:
         "--recursive_item_depth_function",
         choices=["sigmoid", "linear"],
         default="sigmoid",
-        help="Popularity-to-SID-length function used when --recursive_depth_mode=item.",
+        help="Popularity-to-hierarchy-depth function used when --recursive_depth_mode=item.",
     )
     parser.add_argument(
         "--recursive_item_depth_min",
         type=int,
         default=4,
-        help="Minimum final SID length, including the terminal unique-leaf token.",
+        help="Minimum number of hierarchy levels, excluding the unique-leaf token.",
     )
     parser.add_argument(
         "--recursive_item_depth_max",
         type=int,
         default=10,
-        help="Maximum final SID length, including the terminal unique-leaf token.",
+        help="Maximum number of hierarchy levels, excluding the unique-leaf token.",
     )
     parser.add_argument("--recursive_item_depth_alpha", type=float, default=1.0)
     parser.add_argument(
@@ -2715,6 +2723,7 @@ def main() -> None:
     args.input_has_edge_weight = edge_weight is not None
     item_log_frequencies = None
     item_frequencies = None
+    target_hierarchy_depths_all = None
     target_sid_lengths = None
     if args.recursive_popularity_alpha < 0.0:
         raise ValueError("--recursive_popularity_alpha must be >= 0")
@@ -2749,13 +2758,16 @@ def main() -> None:
             "normalization=per_level_minmax_parent_mean_log_frequency"
         )
         if args.recursive_depth_mode == "item":
-            target_sid_lengths = item_target_sid_lengths(all_item_frequencies, args)
+            target_hierarchy_depths_all = item_target_hierarchy_depths(
+                all_item_frequencies, args
+            )
+            target_sid_lengths = target_hierarchy_depths_all + 1
             target_counts = {
-                int(depth): int(np.count_nonzero(target_sid_lengths == depth))
-                for depth in np.unique(target_sid_lengths)
+                int(depth): int(np.count_nonzero(target_hierarchy_depths_all == depth))
+                for depth in np.unique(target_hierarchy_depths_all)
             }
             print(
-                "Item-level target SID lengths: "
+                "Item-level target hierarchy depths: "
                 f"function={args.recursive_item_depth_function}, "
                 f"min={args.recursive_item_depth_min}, "
                 f"max={args.recursive_item_depth_max}, "
@@ -2803,13 +2815,13 @@ def main() -> None:
             item_log_frequencies=item_log_frequencies,
             item_frequencies=item_frequencies,
             target_hierarchy_depths=(
-                target_sid_lengths[item_ids] - 1
-                if target_sid_lengths is not None
+                target_hierarchy_depths_all[item_ids]
+                if target_hierarchy_depths_all is not None
                 else None
             ),
             required_hierarchy_depth=(
-                int(target_sid_lengths.max()) - 1
-                if target_sid_lengths is not None
+                int(target_hierarchy_depths_all.max())
+                if target_hierarchy_depths_all is not None
                 else None
             ),
         )
