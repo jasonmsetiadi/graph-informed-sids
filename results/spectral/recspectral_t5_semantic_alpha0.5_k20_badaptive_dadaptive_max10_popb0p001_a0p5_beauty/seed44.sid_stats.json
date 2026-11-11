@@ -53,9 +53,9 @@
         "count_head": 1733,
         "count_middle": 4524,
         "count_longtail": 1524,
-        "pct_head": 22.27220151651459,
-        "pct_middle": 58.14162704022619,
-        "pct_longtail": 19.58617144325922
+        "pct_head": 71.58199091284592,
+        "pct_middle": 62.322633971621435,
+        "pct_longtail": 62.949194547707556
       },
       "3": {
         "count": 1577,
@@ -67,9 +67,9 @@
         "count_head": 326,
         "count_middle": 943,
         "count_longtail": 308,
-        "pct_head": 20.672162333544705,
-        "pct_middle": 59.79708306911858,
-        "pct_longtail": 19.530754597336717
+        "pct_head": 13.465510119785213,
+        "pct_middle": 12.990770078523212,
+        "pct_longtail": 12.722015695993392
       },
       "4": {
         "count": 1037,
@@ -81,9 +81,9 @@
         "count_head": 147,
         "count_middle": 681,
         "count_longtail": 209,
-        "pct_head": 14.175506268081003,
-        "pct_middle": 65.6702025072324,
-        "pct_longtail": 20.154291224686595
+        "pct_head": 6.07187112763321,
+        "pct_middle": 9.3814575010332,
+        "pct_longtail": 8.632796365138372
       },
       "5": {
         "count": 977,
@@ -95,9 +95,9 @@
         "count_head": 128,
         "count_middle": 640,
         "count_longtail": 209,
-        "pct_head": 13.101330603889458,
-        "pct_middle": 65.50665301944728,
-        "pct_longtail": 21.392016376663253
+        "pct_head": 5.287071458075175,
+        "pct_middle": 8.816641410662626,
+        "pct_longtail": 8.632796365138372
       },
       "6": {
         "count": 638,
@@ -109,9 +109,9 @@
         "count_head": 74,
         "count_middle": 418,
         "count_longtail": 146,
-        "pct_head": 11.598746081504702,
-        "pct_middle": 65.51724137931035,
-        "pct_longtail": 22.884012539184955
+        "pct_head": 3.056588186699711,
+        "pct_middle": 5.758368921339027,
+        "pct_longtail": 6.030565881866997
       },
       "7": {
         "count": 84,
@@ -123,9 +123,9 @@
         "count_head": 13,
         "count_middle": 47,
         "count_longtail": 24,
-        "pct_head": 15.476190476190476,
-        "pct_middle": 55.95238095238095,
-        "pct_longtail": 28.571428571428573
+        "pct_head": 0.53696819496076,
+        "pct_middle": 0.6474721035955365,
+        "pct_longtail": 0.9913258983890955
       },
       "8": {
         "count": 7,
@@ -138,8 +138,8 @@
         "count_middle": 6,
         "count_longtail": 1,
         "pct_head": 0.0,
-        "pct_middle": 85.71428571428571,
-        "pct_longtail": 14.285714285714286
+        "pct_middle": 0.08265601322496212,
+        "pct_longtail": 0.041305245766212306
       }
     }
   },
