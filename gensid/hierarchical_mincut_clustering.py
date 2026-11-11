@@ -202,7 +202,7 @@ def item_target_sid_lengths(
     item_frequencies: np.ndarray,
     args: argparse.Namespace,
 ) -> np.ndarray:
-    """Map each item's training frequency to an exact final SID length."""
+    """Map dataset-normalized log training frequency to an exact SID length."""
     depth_min = int(args.recursive_item_depth_min)
     depth_max = int(args.recursive_item_depth_max)
     if depth_min < 2:
@@ -213,19 +213,43 @@ def item_target_sid_lengths(
         )
 
     log_counts = np.log1p(np.asarray(item_frequencies, dtype=np.float64))
+    log_min = float(log_counts.min())
+    log_max = float(log_counts.max())
+    if log_max == log_min:
+        return np.full(log_counts.shape, depth_max, dtype=np.int64)
+    normalized = (log_counts - log_min) / (log_max - log_min)
+
     if args.recursive_item_depth_function == "sigmoid":
-        if args.recursive_item_depth_alpha < 0.0:
-            raise ValueError("--recursive_item_depth_alpha must be >= 0")
-        logits = (
-            -args.recursive_item_depth_alpha * log_counts
-            + args.recursive_item_depth_beta
+        if args.recursive_item_depth_alpha <= 0.0:
+            raise ValueError("--recursive_item_depth_alpha must be > 0")
+        if not 0.0 <= args.recursive_item_depth_beta <= 1.0:
+            raise ValueError("--recursive_item_depth_beta must be between 0 and 1")
+        logits = -args.recursive_item_depth_alpha * (
+            normalized - args.recursive_item_depth_beta
         )
         sigmoid = 1.0 / (1.0 + np.exp(-np.clip(logits, -60.0, 60.0)))
-        continuous = depth_min + (depth_max - depth_min) * sigmoid
+        rare_logit = np.clip(
+            args.recursive_item_depth_alpha * args.recursive_item_depth_beta,
+            -60.0,
+            60.0,
+        )
+        popular_logit = np.clip(
+            -args.recursive_item_depth_alpha
+            * (1.0 - args.recursive_item_depth_beta),
+            -60.0,
+            60.0,
+        )
+        rare_endpoint = 1.0 / (1.0 + np.exp(-rare_logit))
+        popular_endpoint = 1.0 / (1.0 + np.exp(-popular_logit))
+        scaled = (sigmoid - popular_endpoint) / (
+            rare_endpoint - popular_endpoint
+        )
     else:
-        if args.recursive_item_depth_gamma < 0.0:
-            raise ValueError("--recursive_item_depth_gamma must be >= 0")
-        continuous = depth_max - args.recursive_item_depth_gamma * log_counts
+        if args.recursive_item_depth_gamma <= 0.0:
+            raise ValueError("--recursive_item_depth_gamma must be > 0")
+        scaled = 1.0 - np.power(normalized, args.recursive_item_depth_gamma)
+
+    continuous = depth_min + (depth_max - depth_min) * scaled
 
     # Round halves upward, then enforce the requested final SID-length range.
     return np.clip(
@@ -536,6 +560,9 @@ def save_outputs(
                             for depth in np.unique(target_sid_lengths)
                         },
                         "recursive_item_depth_includes_unique_leaf": True,
+                        "recursive_item_depth_popularity_normalization": (
+                            "dataset_minmax_log1p_training_interaction_count"
+                        ),
                         "recursive_hierarchy_levels": int(
                             len(graph_labels_coarse_to_fine)
                         ),
@@ -2388,8 +2415,18 @@ def parse_args() -> argparse.Namespace:
         help="Maximum final SID length, including the terminal unique-leaf token.",
     )
     parser.add_argument("--recursive_item_depth_alpha", type=float, default=1.0)
-    parser.add_argument("--recursive_item_depth_beta", type=float, default=5.0)
-    parser.add_argument("--recursive_item_depth_gamma", type=float, default=1.0)
+    parser.add_argument(
+        "--recursive_item_depth_beta",
+        type=float,
+        default=0.5,
+        help="Sigmoid midpoint in normalized dataset popularity space [0, 1].",
+    )
+    parser.add_argument(
+        "--recursive_item_depth_gamma",
+        type=float,
+        default=1.0,
+        help="Positive exponent controlling curvature of the normalized linear mapping.",
+    )
     parser.add_argument(
         "--dmon_selection_epochs",
         type=int,
@@ -2716,7 +2753,9 @@ def main() -> None:
                 "Item-level target SID lengths: "
                 f"function={args.recursive_item_depth_function}, "
                 f"min={args.recursive_item_depth_min}, "
-                f"max={args.recursive_item_depth_max}, counts={target_counts}"
+                f"max={args.recursive_item_depth_max}, "
+                "normalization=dataset_minmax_log1p_training_frequency, "
+                f"counts={target_counts}"
             )
 
     print(f"Method: {args.method}")
