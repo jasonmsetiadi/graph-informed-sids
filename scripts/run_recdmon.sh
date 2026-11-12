@@ -68,7 +68,11 @@ EMB_MODEL="sentence-t5-base"
 SEEDS=(42 43 44)
 
 CLUSTERING_METHODS=("${CLUSTERING_METHOD}")
-CLUSTER_SIZES=(216 36 6 1)
+read -r -a CLUSTER_SIZES <<< "${CLUSTER_SIZES:-216 36 6 1}"
+if [[ "${#CLUSTER_SIZES[@]}" -eq 0 ]]; then
+  echo "CLUSTER_SIZES must contain at least one cluster count." >&2
+  exit 2
+fi
 if [[ -n "${RECURSIVE_MODE:-}" ]]; then
   echo "RECURSIVE_MODE has been removed; set RECURSIVE_BRANCH_MODE and RECURSIVE_DEPTH_MODE." >&2
   exit 2
@@ -77,20 +81,38 @@ RECURSIVE_LEVELS="${RECURSIVE_LEVELS:-4}"
 RECURSIVE_BRANCH_MODE="${RECURSIVE_BRANCH_MODE:-adaptive}"
 RECURSIVE_DEPTH_MODE="${RECURSIVE_DEPTH_MODE:-adaptive}"
 RECURSIVE_ITEM_DEPTH_FUNCTION="${RECURSIVE_ITEM_DEPTH_FUNCTION:-sigmoid}"
-RECURSIVE_ITEM_DEPTH_MIN="${RECURSIVE_ITEM_DEPTH_MIN:-4}"
-RECURSIVE_ITEM_DEPTH_MAX="${RECURSIVE_ITEM_DEPTH_MAX:-10}"
+RECURSIVE_ITEM_DEPTH_MIN="${RECURSIVE_ITEM_DEPTH_MIN:-2}"
+RECURSIVE_ITEM_DEPTH_MAX="${RECURSIVE_ITEM_DEPTH_MAX:-8}"
 RECURSIVE_ITEM_DEPTH_ALPHA="${RECURSIVE_ITEM_DEPTH_ALPHA:-1.0}"
 RECURSIVE_ITEM_DEPTH_BETA="${RECURSIVE_ITEM_DEPTH_BETA:-0.5}"
 RECURSIVE_ITEM_DEPTH_GAMMA="${RECURSIVE_ITEM_DEPTH_GAMMA:-1.0}"
+RECURSIVE_ITEM_MODULARITY_THRESHOLD="${RECURSIVE_ITEM_MODULARITY_THRESHOLD:-0.5}"
 RECURSIVE_POPULARITY_EPSILON_BASE="${RECURSIVE_POPULARITY_EPSILON_BASE:-0.001}"
 RECURSIVE_POPULARITY_ALPHA="${RECURSIVE_POPULARITY_ALPHA:-0}"
 DMON_SELECTION_EPOCHS="${DMON_SELECTION_EPOCHS:-50}"
+DMON_ASSIGNMENT_ENCODER="${DMON_ASSIGNMENT_ENCODER:-}"
+DMON_ITEM_STOPPING_CRITERION="${DMON_ITEM_STOPPING_CRITERION:-}"
+DMON_ITEM_CONFIDENCE_THRESHOLD="${DMON_ITEM_CONFIDENCE_THRESHOLD:-0.999}"
 DMON_POPULARITY_BALANCE_LAMBDA="${DMON_POPULARITY_BALANCE_LAMBDA:-0}"
 DMON_POPULARITY_MASS_OBJECTIVE="${DMON_POPULARITY_MASS_OBJECTIVE:-balance}"
 DMON_POPULARITY_PURITY_BINS="${DMON_POPULARITY_PURITY_BINS:-3}"
 SKIP_N_LAST="${SKIP_N_LAST:-2}"
 EVAL_TARGET_POPULARITY_GROUPS="${EVAL_TARGET_POPULARITY_GROUPS:-false}"
 EVAL_POPULARITY_EXTREME_FRACTION="${EVAL_POPULARITY_EXTREME_FRACTION:-0.2}"
+if [[ -z "${DMON_ASSIGNMENT_ENCODER}" ]]; then
+  if [[ "${RECURSIVE_DEPTH_MODE}" == "adaptive-item" ]]; then
+    DMON_ASSIGNMENT_ENCODER="gcn"
+  else
+    DMON_ASSIGNMENT_ENCODER="mlp"
+  fi
+fi
+if [[ -z "${DMON_ITEM_STOPPING_CRITERION}" ]]; then
+  if [[ "${RECURSIVE_DEPTH_MODE}" == "adaptive-item" ]]; then
+    DMON_ITEM_STOPPING_CRITERION="confidence"
+  else
+    DMON_ITEM_STOPPING_CRITERION="modularity"
+  fi
+fi
 case "${RECURSIVE_BRANCH_MODE}" in
   adaptive|fixed) ;;
   *)
@@ -99,12 +121,16 @@ case "${RECURSIVE_BRANCH_MODE}" in
     ;;
 esac
 case "${RECURSIVE_DEPTH_MODE}" in
-  adaptive|item|fixed) ;;
+  adaptive|adaptive-item|item|fixed) ;;
   *)
-    echo "Unsupported RECURSIVE_DEPTH_MODE='${RECURSIVE_DEPTH_MODE}'. Choose adaptive, item, or fixed." >&2
+    echo "Unsupported RECURSIVE_DEPTH_MODE='${RECURSIVE_DEPTH_MODE}'. Choose adaptive, adaptive-item, item, or fixed." >&2
     exit 2
     ;;
 esac
+if [[ "${RECURSIVE_DEPTH_MODE}" == "adaptive-item" && "${CLUSTERING_METHOD}" != "recursive_dmon" ]]; then
+  echo "RECURSIVE_DEPTH_MODE=adaptive-item is supported only by recursive_dmon." >&2
+  exit 2
+fi
 case "${RECURSIVE_ITEM_DEPTH_FUNCTION}" in
   sigmoid|linear) ;;
   *)
@@ -119,6 +145,27 @@ case "${DMON_POPULARITY_MASS_OBJECTIVE}" in
     exit 2
     ;;
 esac
+case "${DMON_ASSIGNMENT_ENCODER}" in
+  mlp|gcn) ;;
+  *)
+    echo "Unsupported DMON_ASSIGNMENT_ENCODER='${DMON_ASSIGNMENT_ENCODER}'. Choose mlp or gcn." >&2
+    exit 2
+    ;;
+esac
+case "${DMON_ITEM_STOPPING_CRITERION}" in
+  modularity|confidence) ;;
+  *)
+    echo "Unsupported DMON_ITEM_STOPPING_CRITERION='${DMON_ITEM_STOPPING_CRITERION}'. Choose modularity or confidence." >&2
+    exit 2
+    ;;
+esac
+if [[ -z "${DMON_ENTROPY_WEIGHT:-}" ]]; then
+  if [[ "${DMON_ITEM_STOPPING_CRITERION}" == "confidence" ]]; then
+    DMON_ENTROPY_WEIGHT="0.0"
+  else
+    DMON_ENTROPY_WEIGHT="0.01"
+  fi
+fi
 if [[ "${RECURSIVE_BRANCH_MODE}" == "fixed" ]]; then
   DEFAULT_RECURSIVE_FACTOR=6
 else
@@ -190,7 +237,11 @@ for SEED in "${SEEDS[@]}"; do
       CLUSTERING_LABEL="ns4gc_${NS4GC_TRAINING_MODE}_alpha${LEIDEN_FUSION_ALPHA}_k${LEIDEN_KNN}"
     fi
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
-    CLUSTERING_LABEL=""
+    if [[ "${DMON_ASSIGNMENT_ENCODER}" == "gcn" ]]; then
+      CLUSTERING_LABEL="gcn"
+    else
+      CLUSTERING_LABEL=""
+    fi
   fi
   if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" || "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     MODE_LABEL="b${RECURSIVE_BRANCH_MODE}_d${RECURSIVE_DEPTH_MODE}"
@@ -212,6 +263,16 @@ for SEED in "${SEEDS[@]}"; do
         ITEM_DEPTH_GAMMA_LABEL="${RECURSIVE_ITEM_DEPTH_GAMMA//./p}"
         MODE_LABEL="${MODE_LABEL}_lin${ITEM_DEPTH_GAMMA_LABEL}_lmin${ITEM_DEPTH_MIN_LABEL}_lmax${ITEM_DEPTH_MAX_LABEL}"
       fi
+    elif [[ "${RECURSIVE_DEPTH_MODE}" == "adaptive-item" ]]; then
+      ITEM_DEPTH_MIN_LABEL="${RECURSIVE_ITEM_DEPTH_MIN//./p}"
+      ITEM_DEPTH_MAX_LABEL="${RECURSIVE_ITEM_DEPTH_MAX//./p}"
+      if [[ "${DMON_ITEM_STOPPING_CRITERION}" == "confidence" ]]; then
+        ITEM_CONFIDENCE_THRESHOLD_LABEL="${DMON_ITEM_CONFIDENCE_THRESHOLD//./p}"
+        MODE_LABEL="${MODE_LABEL}_conf${ITEM_CONFIDENCE_THRESHOLD_LABEL}_lmin${ITEM_DEPTH_MIN_LABEL}_lmax${ITEM_DEPTH_MAX_LABEL}"
+      else
+        ITEM_MODULARITY_THRESHOLD_LABEL="${RECURSIVE_ITEM_MODULARITY_THRESHOLD//./p}"
+        MODE_LABEL="${MODE_LABEL}_q${ITEM_MODULARITY_THRESHOLD_LABEL}_lmin${ITEM_DEPTH_MIN_LABEL}_lmax${ITEM_DEPTH_MAX_LABEL}"
+      fi
     fi
     if [[ -n "${CLUSTERING_LABEL}" ]]; then
       CLUSTERING_LABEL="${CLUSTERING_LABEL}_${MODE_LABEL}"
@@ -226,6 +287,10 @@ for SEED in "${SEEDS[@]}"; do
   fi
   if [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     DMON_POPULARITY_BALANCE_LABEL="${DMON_POPULARITY_BALANCE_LAMBDA//./p}"
+    if [[ "${DMON_ENTROPY_WEIGHT}" != "0.01" ]]; then
+      DMON_ENTROPY_WEIGHT_LABEL="${DMON_ENTROPY_WEIGHT//./p}"
+      CLUSTERING_LABEL="${CLUSTERING_LABEL}_ent${DMON_ENTROPY_WEIGHT_LABEL}"
+    fi
     if [[ "${DMON_POPULARITY_MASS_OBJECTIVE}" == "concentrate" ]]; then
       CLUSTERING_LABEL="${CLUSTERING_LABEL}_popconc${DMON_POPULARITY_BALANCE_LABEL}"
     elif [[ "${DMON_POPULARITY_MASS_OBJECTIVE}" == "separate" ]]; then
@@ -296,6 +361,12 @@ for SEED in "${SEEDS[@]}"; do
         --recursive_item_depth_beta "${RECURSIVE_ITEM_DEPTH_BETA}"
         --recursive_item_depth_gamma "${RECURSIVE_ITEM_DEPTH_GAMMA}"
       )
+    elif [[ "${RECURSIVE_DEPTH_MODE}" == "adaptive-item" ]]; then
+      CLUSTERING_ARGS+=(
+        --recursive_item_depth_min "${RECURSIVE_ITEM_DEPTH_MIN}"
+        --recursive_item_depth_max "${RECURSIVE_ITEM_DEPTH_MAX}"
+        --recursive_item_modularity_threshold "${RECURSIVE_ITEM_MODULARITY_THRESHOLD}"
+      )
     fi
   fi
   if [[ "${CLUSTERING_METHOD}" == "recursive_kmeans" || "${CLUSTERING_METHOD}" == "recursive_spectral" || "${CLUSTERING_METHOD}" == "recursive_leiden" || "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
@@ -315,6 +386,10 @@ for SEED in "${SEEDS[@]}"; do
   elif [[ "${CLUSTERING_METHOD}" == "recursive_dmon" ]]; then
     CLUSTERING_ARGS+=(
       --dmon_selection_epochs "${DMON_SELECTION_EPOCHS}"
+      --dmon_assignment_encoder "${DMON_ASSIGNMENT_ENCODER}"
+      --dmon_item_stopping_criterion "${DMON_ITEM_STOPPING_CRITERION}"
+      --dmon_item_confidence_threshold "${DMON_ITEM_CONFIDENCE_THRESHOLD}"
+      --dmon_entropy_weight "${DMON_ENTROPY_WEIGHT}"
       --dmon_popularity_balance_lambda "${DMON_POPULARITY_BALANCE_LAMBDA}"
       --dmon_popularity_mass_objective "${DMON_POPULARITY_MASS_OBJECTIVE}"
       --dmon_popularity_purity_bins "${DMON_POPULARITY_PURITY_BINS}"

@@ -506,6 +506,7 @@ def main():
     prefixes = args.prefixes if args.prefixes is not None else make_default_prefixes(len(labels))
     effective_lengths = None
     effective_length_source = None
+    unclustered_max_length_count = 0
     if args.variable_length:
         target_sid_lengths = load_item_target_sid_lengths(args.labels_path)
         if target_sid_lengths is not None:
@@ -528,6 +529,13 @@ def main():
         else:
             effective_lengths = infer_effective_lengths(labels)
             effective_length_source = "inferred_branch_stopping"
+
+        # Items absent from the graph have -1 at every hierarchy level. Give
+        # them the maximum available hierarchy length rather than treating the
+        # first special token as their stopping point.
+        unclustered_items = labels[0] < 0
+        unclustered_max_length_count = int(np.count_nonzero(unclustered_items))
+        effective_lengths[unclustered_items] = len(labels)
 
     codes = build_codes(
         labels=labels,
@@ -552,6 +560,7 @@ def main():
             "append_unique_leaf": bool(args.append_unique_leaf),
             "variable_length": bool(args.variable_length),
             "effective_length_source": effective_length_source,
+            "unclustered_max_length_count": unclustered_max_length_count,
             "unclustered_strategy": args.unclustered_strategy,
             "level_cluster_counts_excluding_minus1": {
                 name: int(len(set(map(int, arr[arr >= 0])))) for name, arr in zip(level_names, labels)

@@ -21,9 +21,9 @@ Graph-embedding KMeans sweeps k >= 2 and selects the best embedding-space
 silhouette score, without constructing an additional graph.
 
 Branch-count selection and hierarchy depth are controlled independently by
---recursive_branch_mode and --recursive_depth_mode. Item-level depth maps each
-training interaction count to an exact hierarchy depth and excludes an item
-from deeper clustering as soon as it reaches that target.
+--recursive_branch_mode and --recursive_depth_mode. Item-level depth can use
+either a frequency-derived target or local modularity contribution to exclude
+an item from deeper clustering.
 
 For recursive Leiden, each parent is instead split at a stable resolution selected
 from a log-spaced scan. The number of children and hierarchy depth are determined
@@ -512,6 +512,8 @@ def save_outputs(
             }
         )
         if args.method == "recursive_dmon":
+            metadata["dmon_assignment_encoder"] = args.dmon_assignment_encoder
+            metadata["dmon_entropy_weight"] = float(args.dmon_entropy_weight)
             metadata["dmon_popularity_balance_lambda"] = float(
                 args.dmon_popularity_balance_lambda
             )
@@ -542,40 +544,65 @@ def save_outputs(
                 metadata["recursive_factor_max"] = int(args.recursive_factor)
             if args.recursive_depth_mode == "fixed":
                 metadata["recursive_levels"] = int(args.recursive_levels)
-            elif args.recursive_depth_mode == "item":
+            elif args.recursive_depth_mode in {"item", "adaptive-item"}:
                 if target_sid_lengths is None:
                     raise ValueError(
                         "Item-level depth metadata requires explicit target SID lengths"
                     )
-                metadata.update(
-                    {
-                        "recursive_item_depth_function": args.recursive_item_depth_function,
-                        "recursive_item_depth_min": int(args.recursive_item_depth_min),
-                        "recursive_item_depth_max": int(args.recursive_item_depth_max),
-                        "recursive_item_depth_alpha": float(args.recursive_item_depth_alpha),
-                        "recursive_item_depth_beta": float(args.recursive_item_depth_beta),
-                        "recursive_item_depth_gamma": float(args.recursive_item_depth_gamma),
-                        "recursive_item_depth_counts": {
-                            str(depth): int(
-                                np.count_nonzero(target_sid_lengths - 1 == depth)
-                            )
-                            for depth in np.unique(target_sid_lengths - 1)
-                        },
-                        "recursive_item_final_sid_length_counts": {
-                            str(length): int(
-                                np.count_nonzero(target_sid_lengths == length)
-                            )
-                            for length in np.unique(target_sid_lengths)
-                        },
-                        "recursive_item_depth_includes_unique_leaf": False,
-                        "recursive_item_depth_popularity_normalization": (
-                            "dataset_minmax_log1p_training_interaction_count"
-                        ),
-                        "recursive_hierarchy_levels": int(
-                            len(graph_labels_coarse_to_fine)
-                        ),
-                    }
-                )
+                item_depth_metadata = {
+                    "recursive_item_depth_function": args.recursive_item_depth_function,
+                    "recursive_item_depth_min": int(args.recursive_item_depth_min),
+                    "recursive_item_depth_max": int(args.recursive_item_depth_max),
+                    "recursive_item_depth_counts": {
+                        str(depth): int(
+                            np.count_nonzero(target_sid_lengths - 1 == depth)
+                        )
+                        for depth in np.unique(target_sid_lengths - 1)
+                    },
+                    "recursive_item_final_sid_length_counts": {
+                        str(length): int(
+                            np.count_nonzero(target_sid_lengths == length)
+                        )
+                        for length in np.unique(target_sid_lengths)
+                    },
+                    "recursive_item_depth_includes_unique_leaf": False,
+                    "recursive_hierarchy_levels": int(
+                        len(graph_labels_coarse_to_fine)
+                    ),
+                }
+                if args.recursive_depth_mode == "item":
+                    item_depth_metadata.update(
+                        {
+                            "recursive_item_depth_alpha": float(args.recursive_item_depth_alpha),
+                            "recursive_item_depth_beta": float(args.recursive_item_depth_beta),
+                            "recursive_item_depth_gamma": float(args.recursive_item_depth_gamma),
+                            "recursive_item_depth_popularity_normalization": (
+                                "dataset_minmax_log1p_training_interaction_count"
+                            ),
+                        }
+                    )
+                else:
+                    stopping_criterion = args.dmon_item_stopping_criterion
+                    item_depth_metadata.update(
+                        {
+                            "recursive_item_depth_function": (
+                                "normalized_soft_assignment_confidence"
+                                if stopping_criterion == "confidence"
+                                else "local_normalized_modularity_contribution"
+                            ),
+                            "dmon_item_stopping_criterion": stopping_criterion,
+                            "recursive_item_modularity_threshold": float(
+                                args.recursive_item_modularity_threshold
+                            ),
+                            "dmon_item_confidence_threshold": float(
+                                args.dmon_item_confidence_threshold
+                            ),
+                            "recursive_item_stop_direction": (
+                                "stop_when_selected_signal_exceeds_threshold"
+                            ),
+                        }
+                    )
+                metadata.update(item_depth_metadata)
             else:
                 metadata["natural_depth"] = int(len(graph_labels_coarse_to_fine))
             if args.recursive_branch_mode == "adaptive" and args.method in {"recursive_spectral", "recursive_dmon"}:
@@ -900,6 +927,68 @@ def local_weighted_modularity_gain(
         degree_sum = float(degrees[mask].sum())
         modularity += internal_weight / m2 - (degree_sum / m2) ** 2
     return float(modularity)
+
+
+def local_item_modularity_contributions(
+    A: sp.csr_matrix,
+    subset: np.ndarray,
+    labels: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return each item's raw and degree-normalized local modularity contribution.
+
+    The raw contributions sum to ``local_weighted_modularity_gain``.  Dividing
+    each contribution by the item's local degree mass gives a strength in
+    approximately [-1, 1]: the fraction of its edge weight inside the assigned
+    child minus that child's share of the parent volume.
+    """
+    n = int(len(subset))
+    if labels.shape != (n,):
+        raise ValueError(f"labels must have shape ({n},), got {labels.shape}")
+    raw = np.zeros(n, dtype=np.float64)
+    normalized = np.zeros(n, dtype=np.float64)
+    if n == 0 or len(np.unique(labels)) <= 1:
+        return raw, normalized
+
+    A_sub = A[subset][:, subset].astype(np.float64).tocsr()
+    degrees = np.asarray(A_sub.sum(axis=1)).reshape(-1)
+    m2 = float(degrees.sum())
+    if m2 <= 0.0:
+        return raw, normalized
+
+    for cluster_id in np.unique(labels):
+        mask = labels == cluster_id
+        child_volume = float(degrees[mask].sum())
+        within_child_weight = np.asarray(A_sub[mask][:, mask].sum(axis=1)).reshape(-1)
+        contribution_numerator = (
+            within_child_weight - degrees[mask] * child_volume / m2
+        )
+        raw[mask] = contribution_numerator / m2
+        positive_degree = degrees[mask] > 0.0
+        normalized_values = np.zeros(int(mask.sum()), dtype=np.float64)
+        normalized_values[positive_degree] = (
+            contribution_numerator[positive_degree] / degrees[mask][positive_degree]
+        )
+        normalized[mask] = normalized_values
+
+    return raw, normalized
+
+
+def normalized_assignment_confidence(assignments: np.ndarray) -> np.ndarray:
+    """Convert soft assignments to comparable confidence values in [0, 1]."""
+    if assignments.ndim != 2:
+        raise ValueError(
+            f"assignments must be a two-dimensional array, got {assignments.shape}"
+        )
+    n, k = assignments.shape
+    if k <= 1:
+        return np.ones(n, dtype=np.float64)
+    probabilities = np.asarray(assignments, dtype=np.float64)
+    row_sums = np.clip(probabilities.sum(axis=1, keepdims=True), 1e-12, None)
+    probabilities = probabilities / row_sums
+    entropy = -(
+        probabilities * np.log(np.clip(probabilities, 1e-12, 1.0))
+    ).sum(axis=1)
+    return np.clip(1.0 - entropy / np.log(float(k)), 0.0, 1.0)
 
 
 def embedding_cluster_subset(
@@ -1269,6 +1358,29 @@ class LocalAssignNet(nn.Module):
         return self.net(x)
 
 
+class LocalGCNAssignNet(nn.Module):
+    """Graph-aware assignment encoder for one recursive parent subgraph."""
+
+    def __init__(self, in_dim: int, hidden_dim: int, k: int, dropout: float):
+        super().__init__()
+        self.conv1 = GCNConv(in_dim, hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, k)
+        self.dropout = float(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        x = self.conv1(x, edge_index, edge_weight)
+        x = self.norm1(x)
+        x = F.relu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        return self.conv2(x, edge_index, edge_weight)
+
+
 def dense_dmon_local_loss(
     adj: torch.Tensor,
     logits: torch.Tensor,
@@ -1363,14 +1475,14 @@ def neural_cluster_subset(
     seed: int | None = None,
     epochs: int | None = None,
     item_frequencies: np.ndarray | None = None,
-) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+) -> Tuple[np.ndarray, List[Dict[str, float]], np.ndarray]:
     n = int(len(subset))
     if n == 0:
-        return np.empty((0,), dtype=np.int64), []
+        return np.empty((0,), dtype=np.int64), [], np.empty((0, max(k, 1)))
     if k <= 1:
-        return np.zeros((n,), dtype=np.int64), []
+        return np.zeros((n,), dtype=np.int64), [], np.ones((n, 1))
     if n <= k:
-        return np.arange(n, dtype=np.int64), []
+        return np.arange(n, dtype=np.int64), [], np.eye(n, k, dtype=np.float32)
     if n > args.max_dense_nodes:
         raise ValueError(
             f"Recursive {method} local subset has {n} nodes, above --max_dense_nodes={args.max_dense_nodes}."
@@ -1384,7 +1496,8 @@ def neural_cluster_subset(
         if device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
 
-    A_sub_np = A[subset][:, subset].astype(np.float32).toarray()
+    A_sub_sparse = A[subset][:, subset].astype(np.float32).tocoo()
+    A_sub_np = A_sub_sparse.toarray()
     x_sub = x_all[torch.as_tensor(subset, dtype=torch.long)].to(device)
     adj = torch.as_tensor(A_sub_np, dtype=torch.float32, device=device)
     popularity_weights = None
@@ -1412,14 +1525,36 @@ def neural_cluster_subset(
                 local_bin_ids, num_classes=args.dmon_popularity_purity_bins
             ).to(dtype=torch.float32)
 
-    model = LocalAssignNet(x_sub.size(1), args.assign_hidden_dim, k, args.dropout).to(device)
+    local_edge_index = None
+    local_edge_weight = None
+    if args.dmon_assignment_encoder == "gcn":
+        local_edge_index = torch.as_tensor(
+            np.vstack((A_sub_sparse.row, A_sub_sparse.col)),
+            dtype=torch.long,
+            device=device,
+        )
+        local_edge_weight = torch.as_tensor(
+            A_sub_sparse.data,
+            dtype=torch.float32,
+            device=device,
+        )
+        model = LocalGCNAssignNet(
+            x_sub.size(1), args.assign_hidden_dim, k, args.dropout
+        ).to(device)
+    else:
+        model = LocalAssignNet(
+            x_sub.size(1), args.assign_hidden_dim, k, args.dropout
+        ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     history = []
 
     for epoch in range(1, training_epochs + 1):
         model.train()
         opt.zero_grad()
-        logits = model(x_sub)
+        if args.dmon_assignment_encoder == "gcn":
+            logits = model(x_sub, local_edge_index, local_edge_weight)
+        else:
+            logits = model(x_sub)
         if method == "recursive_dmon":
             loss, metrics = dense_dmon_local_loss(
                 adj=adj,
@@ -1449,8 +1584,13 @@ def neural_cluster_subset(
 
     model.eval()
     with torch.no_grad():
-        labels = model(x_sub).argmax(dim=-1).cpu().numpy().astype(np.int64)
-    return labels, history
+        if args.dmon_assignment_encoder == "gcn":
+            final_logits = model(x_sub, local_edge_index, local_edge_weight)
+        else:
+            final_logits = model(x_sub)
+        final_assignments = F.softmax(final_logits, dim=-1)
+        labels = final_assignments.argmax(dim=-1).cpu().numpy().astype(np.int64)
+    return labels, history, final_assignments.cpu().numpy()
 
 
 def adaptive_dmon_split(
@@ -1465,24 +1605,24 @@ def adaptive_dmon_split(
     cluster_popularity: float | None = None,
     require_quality: bool = True,
     item_frequencies: np.ndarray | None = None,
-) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+) -> Tuple[np.ndarray, List[Dict[str, float]], np.ndarray]:
     """Select a local DMoN split by sweeping k and maximizing hard modularity."""
     n = int(len(subset))
     upper = min(int(max_branches), n - 1)
     if upper < 2:
         print(f"  {context}: nodes={n}, no DMoN split candidate", flush=True)
-        return np.zeros(n, dtype=np.int64), []
+        return np.zeros(n, dtype=np.int64), [], np.ones((n, 1), dtype=np.float32)
 
     A_sub = A[subset][:, subset]
     if A_sub.nnz == 0 or float(A_sub.sum()) <= 0.0:
         print(f"  {context}: no positive internal edge weight; keeping one branch", flush=True)
-        return np.zeros(n, dtype=np.int64), []
+        return np.zeros(n, dtype=np.int64), [], np.ones((n, 1), dtype=np.float32)
 
     screening_epochs = min(int(args.dmon_selection_epochs), int(args.recursive_epochs))
     if screening_epochs < 1:
         raise ValueError("--dmon_selection_epochs must be >= 1")
 
-    candidates: List[Tuple[int, np.ndarray, float, int]] = []
+    candidates: List[Tuple[int, np.ndarray, float, int, np.ndarray]] = []
     history: List[Dict[str, float]] = []
     for k in range(2, upper + 1):
         print(
@@ -1490,7 +1630,7 @@ def adaptive_dmon_split(
             f"for {screening_epochs} epochs",
             flush=True,
         )
-        candidate_labels, candidate_history = neural_cluster_subset(
+        candidate_labels, candidate_history, candidate_assignments = neural_cluster_subset(
             method="recursive_dmon",
             x_all=x_all,
             A=A,
@@ -1521,15 +1661,21 @@ def adaptive_dmon_split(
                 "candidate_valid": float(valid),
             }
         )
-        candidates.append((k, candidate_labels, gain, children))
+        candidates.append((k, candidate_labels, gain, children, candidate_assignments))
 
     valid_candidates = [candidate for candidate in candidates if candidate[3] > 1]
     if not valid_candidates:
         print(f"  {context}: all DMoN candidates collapsed; keeping one branch", flush=True)
-        return np.zeros(n, dtype=np.int64), history
+        return np.zeros(n, dtype=np.int64), history, np.ones((n, 1), dtype=np.float32)
 
     # Exact score ties prefer the simpler partition with the smaller requested k.
-    selected_k, screened_labels, screened_gain, screened_children = max(
+    (
+        selected_k,
+        screened_labels,
+        screened_gain,
+        screened_children,
+        screened_assignments,
+    ) = max(
         valid_candidates,
         key=lambda candidate: (candidate[2], -candidate[0]),
     )
@@ -1554,7 +1700,7 @@ def adaptive_dmon_split(
             f"for {args.recursive_epochs} epochs",
             flush=True,
         )
-        selected_labels, final_history = neural_cluster_subset(
+        selected_labels, final_history, selected_assignments = neural_cluster_subset(
             method="recursive_dmon",
             x_all=x_all,
             A=A,
@@ -1571,6 +1717,7 @@ def adaptive_dmon_split(
         history.extend(final_history)
     else:
         selected_labels = screened_labels
+        selected_assignments = screened_assignments
 
     selected_children = int(len(np.unique(selected_labels)))
     selected_gain = local_weighted_modularity_gain(A, subset, selected_labels)
@@ -1602,8 +1749,8 @@ def adaptive_dmon_split(
         }
     )
     if not split_accepted:
-        return np.zeros(n, dtype=np.int64), history
-    return selected_labels, history
+        return np.zeros(n, dtype=np.int64), history, selected_assignments
+    return selected_labels, history, selected_assignments
 
 
 # -----------------------------------------------------------------------------
@@ -1624,7 +1771,7 @@ def recursive_hierarchy(
     item_frequencies: np.ndarray | None = None,
     target_hierarchy_depths: np.ndarray | None = None,
     required_hierarchy_depth: int | None = None,
-) -> Tuple[List[np.ndarray], List[Dict[str, float]]]:
+) -> Tuple[List[np.ndarray], List[Dict[str, float]], np.ndarray | None]:
     if factor < 2:
         raise ValueError("--recursive_factor must be >= 2")
     adaptive_branch = args.recursive_branch_mode == "adaptive"
@@ -1638,7 +1785,10 @@ def recursive_hierarchy(
         "recursive_dmon",
         "recursive_kmeans",
     }
-    adaptive_depth = cluster_adaptive_depth or item_adaptive_depth
+    modularity_item_depth = (
+        args.recursive_depth_mode == "adaptive-item" and method == "recursive_dmon"
+    )
+    adaptive_depth = cluster_adaptive_depth or item_adaptive_depth or modularity_item_depth
     if item_adaptive_depth:
         if target_hierarchy_depths is None or target_hierarchy_depths.shape != (x.size(0),):
             raise ValueError(
@@ -1649,6 +1799,17 @@ def recursive_hierarchy(
             if required_hierarchy_depth < 1:
                 raise ValueError("required_hierarchy_depth must be at least 1")
             max_target_depth = max(max_target_depth, int(required_hierarchy_depth))
+    adaptive_item_depths = None
+    adaptive_item_active = None
+    if modularity_item_depth:
+        if args.recursive_item_depth_min < 1:
+            raise ValueError("--recursive_item_depth_min must be at least 1")
+        if args.recursive_item_depth_max < args.recursive_item_depth_min:
+            raise ValueError(
+                "--recursive_item_depth_max must be >= --recursive_item_depth_min"
+            )
+        adaptive_item_depths = np.zeros(x.size(0), dtype=np.int64)
+        adaptive_item_active = np.ones(x.size(0), dtype=bool)
     if not adaptive_depth and levels < 1:
         raise ValueError("--recursive_levels must be >= 1")
 
@@ -1701,8 +1862,16 @@ def recursive_hierarchy(
     rng_seed = int(args.seed)
 
     level = 1
-    while (item_adaptive_depth and level <= max_target_depth) or (
-        not item_adaptive_depth and (adaptive_depth or level <= levels)
+    while (
+        item_adaptive_depth and level <= max_target_depth
+    ) or (
+        modularity_item_depth
+        and bool(active_parents)
+        and level <= args.recursive_item_depth_max
+    ) or (
+        not item_adaptive_depth
+        and not modularity_item_depth
+        and (adaptive_depth or level <= levels)
     ):
         new_labels = np.full(n, -1, dtype=np.int64)
         next_cluster_id = 0
@@ -1717,9 +1886,13 @@ def recursive_hierarchy(
 
         for parent in parents:
             subset = np.where(parent_labels == parent)[0].astype(np.int64)
+            local_assignments = None
             if item_adaptive_depth:
                 split_subset = subset[target_hierarchy_depths[subset] >= level]
                 stopped_subset = subset[target_hierarchy_depths[subset] < level]
+            elif modularity_item_depth:
+                split_subset = subset[adaptive_item_active[subset]]
+                stopped_subset = subset[~adaptive_item_active[subset]]
             else:
                 split_subset = subset
                 stopped_subset = np.empty(0, dtype=np.int64)
@@ -1786,7 +1959,7 @@ def recursive_hierarchy(
                         local_history = []
                 elif method == "recursive_dmon":
                     if adaptive_branch:
-                        local, local_history = adaptive_dmon_split(
+                        local, local_history, local_assignments = adaptive_dmon_split(
                             x_all=x,
                             A=A,
                             subset=split_subset,
@@ -1800,7 +1973,7 @@ def recursive_hierarchy(
                             item_frequencies=item_frequencies,
                         )
                     else:
-                        local, local_history = neural_cluster_subset(
+                        local, local_history, local_assignments = neural_cluster_subset(
                             method=method,
                             x_all=x,
                             A=A,
@@ -1939,6 +2112,98 @@ def recursive_hierarchy(
                     if not split_accepted:
                         local = np.zeros(len(split_subset), dtype=np.int64)
 
+            adaptive_item_continue = None
+            if modularity_item_depth and len(split_subset) > 0:
+                adaptive_item_continue = np.zeros(len(split_subset), dtype=bool)
+                proposed_children = int(len(np.unique(local)))
+                if proposed_children > 1:
+                    criterion = args.dmon_item_stopping_criterion
+                    if criterion == "confidence":
+                        if local_assignments is None:
+                            raise ValueError(
+                                "Confidence stopping requires DMoN soft assignments"
+                            )
+                        stopping_values = normalized_assignment_confidence(
+                            local_assignments
+                        )
+                        stopping_threshold = args.dmon_item_confidence_threshold
+                        signal_name = "item assignment confidence"
+                    else:
+                        raw_contribution, stopping_values = (
+                            local_item_modularity_contributions(A, split_subset, local)
+                        )
+                        stopping_threshold = args.recursive_item_modularity_threshold
+                        signal_name = "item modularity strength"
+                    eligible_to_stop = level >= args.recursive_item_depth_min
+                    forced_stop = level >= args.recursive_item_depth_max
+                    if not forced_stop:
+                        adaptive_item_continue = ~(
+                            eligible_to_stop
+                            & (stopping_values > stopping_threshold)
+                        )
+
+                    stopped_now = ~adaptive_item_continue
+                    adaptive_item_active[split_subset[stopped_now]] = False
+                    adaptive_item_depths[split_subset[stopped_now]] = level
+                    stopping_history = {
+                        "item_stopping_uses_confidence": float(
+                            criterion == "confidence"
+                        ),
+                        "item_stopping_threshold": float(stopping_threshold),
+                        "item_stopping_value_min": float(stopping_values.min()),
+                        "item_stopping_value_mean": float(stopping_values.mean()),
+                        "item_stopping_value_max": float(stopping_values.max()),
+                        "items_stopped": float(stopped_now.sum()),
+                        "items_continued": float(adaptive_item_continue.sum()),
+                        "item_stop_eligible": float(eligible_to_stop),
+                        "item_stop_forced": float(forced_stop),
+                    }
+                    if criterion == "modularity":
+                        stopping_history.update(
+                            {
+                                "item_modularity_threshold": float(
+                                    args.recursive_item_modularity_threshold
+                                ),
+                                "item_modularity_raw_sum": float(
+                                    raw_contribution.sum()
+                                ),
+                                "item_modularity_normalized_min": float(
+                                    stopping_values.min()
+                                ),
+                                "item_modularity_normalized_mean": float(
+                                    stopping_values.mean()
+                                ),
+                                "item_modularity_normalized_max": float(
+                                    stopping_values.max()
+                                ),
+                            }
+                        )
+                    else:
+                        stopping_history.update(
+                            {
+                                "item_confidence_threshold": float(
+                                    args.dmon_item_confidence_threshold
+                                ),
+                                "item_confidence_min": float(stopping_values.min()),
+                                "item_confidence_mean": float(stopping_values.mean()),
+                                "item_confidence_max": float(stopping_values.max()),
+                            }
+                        )
+                    local_history.append(stopping_history)
+                    print(
+                        f"  {split_context}: {signal_name} "
+                        f"min={stopping_values.min():.6g}, "
+                        f"mean={stopping_values.mean():.6g}, "
+                        f"max={stopping_values.max():.6g}, "
+                        f"threshold={stopping_threshold:.6g}, "
+                        f"stopped={int(stopped_now.sum())}, "
+                        f"continued={int(adaptive_item_continue.sum())}",
+                        flush=True,
+                    )
+                else:
+                    adaptive_item_active[split_subset] = False
+                    adaptive_item_depths[split_subset] = level
+
             local_ids = sorted(np.unique(local).tolist())
             parent_split = len(local_ids) > 1 or (
                 len(stopped_subset) > 0 and len(split_subset) > 0
@@ -1956,6 +2221,14 @@ def recursive_hierarchy(
                 if item_adaptive_depth:
                     if np.any(target_hierarchy_depths[child_items] > level):
                         next_active_parents.add(next_cluster_id)
+                elif modularity_item_depth:
+                    child_continue = adaptive_item_continue[mask]
+                    if int(child_continue.sum()) > 1:
+                        next_active_parents.add(next_cluster_id)
+                    elif int(child_continue.sum()) == 1:
+                        lone_item = child_items[child_continue][0]
+                        adaptive_item_active[lone_item] = False
+                        adaptive_item_depths[lone_item] = level
                 elif parent_split and int(mask.sum()) > 1:
                     next_active_parents.add(next_cluster_id)
                 next_cluster_id += 1
@@ -1978,7 +2251,12 @@ def recursive_hierarchy(
         active_parents = next_active_parents
         level += 1
 
-    return hierarchy, history
+    if modularity_item_depth:
+        unresolved = adaptive_item_depths == 0
+        if np.any(unresolved):
+            adaptive_item_depths[unresolved] = max(1, len(hierarchy))
+        return hierarchy, history, adaptive_item_depths
+    return hierarchy, history, None
 
 
 def recursive_leiden_hierarchy(
@@ -2394,11 +2672,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--recursive_depth_mode",
-        choices=["adaptive", "item", "fixed"],
+        choices=["adaptive", "adaptive-item", "item", "fixed"],
         default="adaptive",
         help=(
-            "Stop clusters by split quality, stop each item at its popularity-derived "
-            "target SID length, or run exactly --recursive_levels levels."
+            "Stop clusters by split quality, stop items by local modularity contribution, "
+            "stop items at popularity-derived target lengths, or run exactly "
+            "--recursive_levels levels."
         ),
     )
     parser.add_argument("--recursive_factor", type=int, default=4, help="Maximum child clusters per parent for recursive methods.")
@@ -2406,7 +2685,7 @@ def parse_args() -> argparse.Namespace:
         "--recursive_levels",
         type=int,
         default=2,
-        help="Exact hierarchy depth in fixed mode; ignored by adaptive and item modes.",
+        help="Exact hierarchy depth in fixed mode; ignored by adaptive depth modes.",
     )
     parser.add_argument("--recursive_epochs", type=int, default=100)
     parser.add_argument(
@@ -2418,16 +2697,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recursive_item_depth_min",
         type=int,
-        default=4,
+        default=2,
         help="Minimum number of hierarchy levels, excluding the unique-leaf token.",
     )
     parser.add_argument(
         "--recursive_item_depth_max",
         type=int,
-        default=10,
+        default=8,
         help="Maximum number of hierarchy levels, excluding the unique-leaf token.",
     )
     parser.add_argument("--recursive_item_depth_alpha", type=float, default=1.0)
+    parser.add_argument(
+        "--recursive_item_modularity_threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "In adaptive-item mode, stop an item once its degree-normalized local "
+            "modularity contribution exceeds this value."
+        ),
+    )
     parser.add_argument(
         "--recursive_item_depth_beta",
         type=float,
@@ -2445,6 +2733,33 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="Short training budget for each adaptive DMoN k candidate before retraining the winner.",
+    )
+    parser.add_argument(
+        "--dmon_assignment_encoder",
+        choices=["mlp", "gcn"],
+        default="mlp",
+        help=(
+            "Assignment encoder for recursive DMoN. GCN uses the induced parent "
+            "subgraph and edge weights; MLP uses item features only."
+        ),
+    )
+    parser.add_argument(
+        "--dmon_item_stopping_criterion",
+        choices=["modularity", "confidence"],
+        default="modularity",
+        help=(
+            "Per-item stopping signal in adaptive-item mode. Confidence is one "
+            "minus assignment entropy normalized by log(k)."
+        ),
+    )
+    parser.add_argument(
+        "--dmon_item_confidence_threshold",
+        type=float,
+        default=0.999,
+        help=(
+            "Stop an eligible item when normalized soft-assignment confidence "
+            "exceeds this value."
+        ),
     )
     parser.add_argument(
         "--recursive_min_modularity_gain",
@@ -2708,6 +3023,10 @@ def main() -> None:
             "--recursive_depth_mode=item is supported by recursive_spectral, "
             "recursive_dmon, and recursive_kmeans"
         )
+    if args.recursive_depth_mode == "adaptive-item" and args.method != "recursive_dmon":
+        raise ValueError(
+            "--recursive_depth_mode=adaptive-item is supported only by recursive_dmon"
+        )
     graph_building_kwargs = json.loads(args.graph_building_kwargs)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -2733,6 +3052,8 @@ def main() -> None:
         raise ValueError("--dmon_popularity_balance_lambda must be between 0 and 1")
     if args.dmon_popularity_purity_bins < 2:
         raise ValueError("--dmon_popularity_purity_bins must be at least 2")
+    if not 0.0 <= args.dmon_item_confidence_threshold <= 1.0:
+        raise ValueError("--dmon_item_confidence_threshold must be between 0 and 1")
     popularity_methods = {
         "recursive_dmon",
         "recursive_spectral",
@@ -2784,6 +3105,9 @@ def main() -> None:
         )
     if args.method == "recursive_dmon":
         print(
+            f"DMoN assignment encoder: {args.dmon_assignment_encoder}\n"
+            f"DMoN item stopping criterion: {args.dmon_item_stopping_criterion}, "
+            f"confidence_threshold={args.dmon_item_confidence_threshold}\n"
             "DMoN popularity-mass objective: "
             f"{args.dmon_popularity_mass_objective}, "
             f"lambda={args.dmon_popularity_balance_lambda}"
@@ -2803,7 +3127,7 @@ def main() -> None:
         )
         artifacts = {}
     else:
-        labels_c2f, history = recursive_hierarchy(
+        labels_c2f, history, adaptive_item_depths = recursive_hierarchy(
             method=args.method,
             x=x_graph,
             edge_index=edge_index,
@@ -2825,6 +3149,9 @@ def main() -> None:
                 else None
             ),
         )
+        if adaptive_item_depths is not None:
+            target_sid_lengths = np.full(raw_embeddings.shape[0], 2, dtype=np.int64)
+            target_sid_lengths[item_ids] = adaptive_item_depths + 1
         artifacts = {}
 
     save_outputs(
