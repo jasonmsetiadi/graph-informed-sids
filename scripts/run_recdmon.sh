@@ -80,7 +80,7 @@ fi
 RECURSIVE_LEVELS="${RECURSIVE_LEVELS:-4}"
 RECURSIVE_BRANCH_MODE="${RECURSIVE_BRANCH_MODE:-adaptive}"
 RECURSIVE_DEPTH_MODE="${RECURSIVE_DEPTH_MODE:-adaptive}"
-RECURSIVE_ITEM_DEPTH_FUNCTION="${RECURSIVE_ITEM_DEPTH_FUNCTION:-sigmoid}"
+RECURSIVE_ITEM_DEPTH_FUNCTION="${RECURSIVE_ITEM_DEPTH_FUNCTION:-tiered}"
 RECURSIVE_ITEM_DEPTH_MIN="${RECURSIVE_ITEM_DEPTH_MIN:-2}"
 RECURSIVE_ITEM_DEPTH_MAX="${RECURSIVE_ITEM_DEPTH_MAX:-8}"
 RECURSIVE_ITEM_DEPTH_ALPHA="${RECURSIVE_ITEM_DEPTH_ALPHA:-1.0}"
@@ -132,9 +132,9 @@ if [[ "${RECURSIVE_DEPTH_MODE}" == "adaptive-item" && "${CLUSTERING_METHOD}" != 
   exit 2
 fi
 case "${RECURSIVE_ITEM_DEPTH_FUNCTION}" in
-  sigmoid|linear) ;;
+  tiered|sigmoid|linear) ;;
   *)
-    echo "Unsupported RECURSIVE_ITEM_DEPTH_FUNCTION='${RECURSIVE_ITEM_DEPTH_FUNCTION}'. Choose sigmoid or linear." >&2
+    echo "Unsupported RECURSIVE_ITEM_DEPTH_FUNCTION='${RECURSIVE_ITEM_DEPTH_FUNCTION}'. Choose tiered, sigmoid, or linear." >&2
     exit 2
     ;;
 esac
@@ -255,7 +255,9 @@ for SEED in "${SEEDS[@]}"; do
     elif [[ "${RECURSIVE_DEPTH_MODE}" == "item" ]]; then
       ITEM_DEPTH_MIN_LABEL="${RECURSIVE_ITEM_DEPTH_MIN//./p}"
       ITEM_DEPTH_MAX_LABEL="${RECURSIVE_ITEM_DEPTH_MAX//./p}"
-      if [[ "${RECURSIVE_ITEM_DEPTH_FUNCTION}" == "sigmoid" ]]; then
+      if [[ "${RECURSIVE_ITEM_DEPTH_FUNCTION}" == "tiered" ]]; then
+        MODE_LABEL="${MODE_LABEL}_tier_lmin${ITEM_DEPTH_MIN_LABEL}_lmax${ITEM_DEPTH_MAX_LABEL}"
+      elif [[ "${RECURSIVE_ITEM_DEPTH_FUNCTION}" == "sigmoid" ]]; then
         ITEM_DEPTH_ALPHA_LABEL="${RECURSIVE_ITEM_DEPTH_ALPHA//./p}"
         ITEM_DEPTH_BETA_LABEL="${RECURSIVE_ITEM_DEPTH_BETA//./p}"
         MODE_LABEL="${MODE_LABEL}_sig${ITEM_DEPTH_ALPHA_LABEL}b${ITEM_DEPTH_BETA_LABEL}_lmin${ITEM_DEPTH_MIN_LABEL}_lmax${ITEM_DEPTH_MAX_LABEL}"
@@ -357,10 +359,17 @@ for SEED in "${SEEDS[@]}"; do
         --recursive_item_depth_function "${RECURSIVE_ITEM_DEPTH_FUNCTION}"
         --recursive_item_depth_min "${RECURSIVE_ITEM_DEPTH_MIN}"
         --recursive_item_depth_max "${RECURSIVE_ITEM_DEPTH_MAX}"
-        --recursive_item_depth_alpha "${RECURSIVE_ITEM_DEPTH_ALPHA}"
-        --recursive_item_depth_beta "${RECURSIVE_ITEM_DEPTH_BETA}"
-        --recursive_item_depth_gamma "${RECURSIVE_ITEM_DEPTH_GAMMA}"
       )
+      if [[ "${RECURSIVE_ITEM_DEPTH_FUNCTION}" == "sigmoid" ]]; then
+        CLUSTERING_ARGS+=(
+          --recursive_item_depth_alpha "${RECURSIVE_ITEM_DEPTH_ALPHA}"
+          --recursive_item_depth_beta "${RECURSIVE_ITEM_DEPTH_BETA}"
+        )
+      elif [[ "${RECURSIVE_ITEM_DEPTH_FUNCTION}" == "linear" ]]; then
+        CLUSTERING_ARGS+=(
+          --recursive_item_depth_gamma "${RECURSIVE_ITEM_DEPTH_GAMMA}"
+        )
+      fi
     elif [[ "${RECURSIVE_DEPTH_MODE}" == "adaptive-item" ]]; then
       CLUSTERING_ARGS+=(
         --recursive_item_depth_min "${RECURSIVE_ITEM_DEPTH_MIN}"

@@ -202,7 +202,7 @@ def item_target_hierarchy_depths(
     item_frequencies: np.ndarray,
     args: argparse.Namespace,
 ) -> np.ndarray:
-    """Map dataset-normalized log training frequency to a hierarchy depth."""
+    """Map global training popularity to a per-item hierarchy depth."""
     depth_min = int(args.recursive_item_depth_min)
     depth_max = int(args.recursive_item_depth_max)
     if depth_min < 1:
@@ -212,7 +212,53 @@ def item_target_hierarchy_depths(
             "--recursive_item_depth_max must be >= --recursive_item_depth_min"
         )
 
-    log_counts = np.log1p(np.asarray(item_frequencies, dtype=np.float64))
+    frequencies = np.asarray(item_frequencies, dtype=np.float64)
+    if frequencies.ndim != 1:
+        raise ValueError("item_frequencies must be one-dimensional")
+
+    if args.recursive_item_depth_function == "tiered":
+        num_items = frequencies.size
+        if num_items == 0:
+            return np.empty(0, dtype=np.int64)
+
+        # Match popularity_length_stats: descending frequency with item ID as a
+        # deterministic tiebreaker and ceil(20% * N) head/tail groups. Split
+        # each of head, middle, and tail in half to produce six ordered tiers.
+        item_ids = np.arange(num_items, dtype=np.int64)
+        order = np.lexsort((item_ids, -frequencies))
+        extreme_size = min(
+            num_items // 2,
+            max(1, int(np.ceil(num_items * 0.2))),
+        )
+        middle_size = num_items - 2 * extreme_size
+        tier_sizes = (
+            (extreme_size + 1) // 2,
+            extreme_size // 2,
+            (middle_size + 1) // 2,
+            middle_size // 2,
+            extreme_size // 2,
+            (extreme_size + 1) // 2,
+        )
+
+        # Spread the six popularity-rank tiers across [min, max - 1]. With
+        # the default 2..8 range this is exactly depths 2, 3, 4, 5, 6, 7.
+        positive_depth_max = max(depth_min, depth_max - 1)
+        tier_depths = np.floor(
+            np.linspace(depth_min, positive_depth_max, len(tier_sizes)) + 0.5
+        ).astype(np.int64)
+        targets = np.empty(num_items, dtype=np.int64)
+        start = 0
+        for tier_size, tier_depth in zip(tier_sizes, tier_depths):
+            stop = start + tier_size
+            targets[order[start:stop]] = tier_depth
+            start = stop
+
+        # Catalog items absent from training are explicitly reserved for the
+        # maximum hierarchy depth, regardless of their rank inside the tail.
+        targets[frequencies <= 0.0] = depth_max
+        return targets
+
+    log_counts = np.log1p(frequencies)
     log_min = float(log_counts.min())
     log_max = float(log_counts.max())
     if log_max == log_min:
@@ -573,14 +619,44 @@ def save_outputs(
                 if args.recursive_depth_mode == "item":
                     item_depth_metadata.update(
                         {
-                            "recursive_item_depth_alpha": float(args.recursive_item_depth_alpha),
-                            "recursive_item_depth_beta": float(args.recursive_item_depth_beta),
-                            "recursive_item_depth_gamma": float(args.recursive_item_depth_gamma),
                             "recursive_item_depth_popularity_normalization": (
-                                "dataset_minmax_log1p_training_interaction_count"
+                                "dataset_rank_head20_middle60_tail20"
+                                if args.recursive_item_depth_function == "tiered"
+                                else "dataset_minmax_log1p_training_interaction_count"
                             ),
                         }
                     )
+                    if args.recursive_item_depth_function == "tiered":
+                        item_depth_metadata.update(
+                            {
+                                "recursive_item_depth_rank_boundaries": [
+                                    0.1,
+                                    0.2,
+                                    0.5,
+                                    0.8,
+                                    0.9,
+                                ],
+                                "recursive_item_depth_tie_breaker": "ascending_item_id",
+                                "recursive_item_zero_frequency_depth": int(
+                                    args.recursive_item_depth_max
+                                ),
+                            }
+                        )
+                    elif args.recursive_item_depth_function == "sigmoid":
+                        item_depth_metadata.update(
+                            {
+                                "recursive_item_depth_alpha": float(
+                                    args.recursive_item_depth_alpha
+                                ),
+                                "recursive_item_depth_beta": float(
+                                    args.recursive_item_depth_beta
+                                ),
+                            }
+                        )
+                    else:
+                        item_depth_metadata["recursive_item_depth_gamma"] = float(
+                            args.recursive_item_depth_gamma
+                        )
                 else:
                     stopping_criterion = args.dmon_item_stopping_criterion
                     item_depth_metadata.update(
@@ -2690,9 +2766,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recursive_epochs", type=int, default=100)
     parser.add_argument(
         "--recursive_item_depth_function",
-        choices=["sigmoid", "linear"],
-        default="sigmoid",
-        help="Popularity-to-hierarchy-depth function used when --recursive_depth_mode=item.",
+        choices=["tiered", "sigmoid", "linear"],
+        default="tiered",
+        help=(
+            "Popularity-to-hierarchy-depth function used when "
+            "--recursive_depth_mode=item. Tiered maps the top 20%, middle 60%, "
+            "and bottom 20% to successive pairs of depths."
+        ),
     )
     parser.add_argument(
         "--recursive_item_depth_min",
@@ -3092,8 +3172,13 @@ def main() -> None:
                 f"function={args.recursive_item_depth_function}, "
                 f"min={args.recursive_item_depth_min}, "
                 f"max={args.recursive_item_depth_max}, "
-                "normalization=dataset_minmax_log1p_training_frequency, "
-                f"counts={target_counts}"
+                "normalization="
+                + (
+                    "dataset_rank_head20_middle60_tail20, "
+                    if args.recursive_item_depth_function == "tiered"
+                    else "dataset_minmax_log1p_training_frequency, "
+                )
+                + f"counts={target_counts}"
             )
 
     print(f"Method: {args.method}")
