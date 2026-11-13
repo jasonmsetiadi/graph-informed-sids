@@ -1,0 +1,60 @@
+{
+  "num_items": 18357,
+  "num_unique_sids": 18357,
+  "num_colliding_items": 0,
+  "collision_rate": 0.0,
+  "max_collision_group_size": 1,
+  "labels_path": "cache/gensid/mincut_runs/RecDMoN_t5_badaptive_dadaptive_max10_popb0p001_a0_bal0_pred1p0_beta0p5_tau0p01_Sports_and_Outdoors_seed43/graph_hierarchy_labels.json",
+  "label_group": "coarse_to_fine_item_labels",
+  "levels": [
+    "level_1"
+  ],
+  "num_levels": 1,
+  "append_unique_leaf": true,
+  "variable_length": true,
+  "effective_length_source": "inferred_branch_stopping",
+  "unclustered_strategy": "special",
+  "level_cluster_counts_excluding_minus1": {
+    "level_1": 1
+  },
+  "level_unclustered_counts": {
+    "level_1": 73
+  },
+  "length": {
+    "mean_uniform": 2.0,
+    "mean_unigram": 2.0
+  },
+  "popularity_length": {
+    "pop_stats_by_length": {
+      "2": {
+        "count": 18357,
+        "pop_mean": 12.264585716620363,
+        "pop_median": 7.0,
+        "pop_std": 21.092561714614234,
+        "pop_min": 0.0,
+        "pop_max": 880.0,
+        "count_head": 3672,
+        "count_middle": 11013,
+        "count_longtail": 3672,
+        "pct_head": 100.0,
+        "pct_middle": 100.0,
+        "pct_longtail": 100.0
+      }
+    }
+  },
+  "head_longtail": {
+    "mean_length_head": 2.0,
+    "mean_length_middle": 2.0,
+    "mean_length_longtail": 2.0,
+    "count_head": 3672,
+    "count_middle": 11013,
+    "count_longtail": 3672
+  },
+  "sid_length_min": 2,
+  "sid_length_max": 2,
+  "sid_length_mean": 2.0,
+  "sid_length_histogram": {
+    "2": 18357
+  },
+  "reindex_contiguous": false
+}

@@ -1,0 +1,12 @@
+{
+  "step": null,
+  "epoch": null,
+  "split": "test",
+  "metadata": null,
+  "metrics": {
+    "ndcg@5": 0.02427390031516552,
+    "ndcg@10": 0.03296777233481407,
+    "recall@5": 0.0379197783768177,
+    "recall@10": 0.06501810997724533
+  }
+}
